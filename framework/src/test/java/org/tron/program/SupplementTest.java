@@ -1,40 +1,35 @@
 package org.tron.program;
 
+import static org.apache.commons.lang3.StringUtils.EMPTY;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
+import static org.tron.keystore.WalletUtils.passwordValid;
 
 import java.io.File;
+import java.io.IOException;
 import java.math.BigInteger;
 import javax.annotation.Resource;
 import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
-import org.junit.runner.RunWith;
-import org.springframework.test.annotation.DirtiesContext;
-import org.springframework.test.context.ContextConfiguration;
-import org.springframework.test.context.junit4.SpringJUnit4ClassRunner;
-import org.tron.common.config.DbBackupConfig;
+import org.tron.common.BaseTest;
+import org.tron.common.TestConstants;
 import org.tron.common.entity.PeerInfo;
 import org.tron.common.utils.CompactEncoder;
 import org.tron.common.utils.JsonUtil;
 import org.tron.common.utils.Value;
-import org.tron.core.Constant;
 import org.tron.core.capsule.StorageRowCapsule;
 import org.tron.core.capsule.utils.RLP;
-import org.tron.core.config.DefaultConfig;
+import org.tron.core.config.TronLogShutdownHook;
 import org.tron.core.config.args.Args;
 import org.tron.core.services.http.HttpSelfFormatFieldName;
 import org.tron.core.store.StorageRowStore;
-import org.tron.keystore.WalletUtils;
 
-@RunWith(SpringJUnit4ClassRunner.class)
-@DirtiesContext
-@ContextConfiguration(classes = {DefaultConfig.class})
-public class SupplementTest {
+public class SupplementTest extends BaseTest {
 
-  private static final String dbPath = "output_coverage_test";
+  private static String dbPath;
 
   @Resource
   private StorageRowStore storageRowStore;
@@ -43,8 +38,9 @@ public class SupplementTest {
   public ExpectedException thrown = ExpectedException.none();
 
   @BeforeClass
-  public static void init() {
-    Args.setParam(new String[]{"--output-directory", dbPath, "--debug"}, Constant.TEST_CONF);
+  public static void init() throws IOException {
+    dbPath = dbPath();
+    Args.setParam(new String[]{"--output-directory", dbPath, "--debug"}, TestConstants.TEST_CONF);
   }
 
   @Test
@@ -52,14 +48,6 @@ public class SupplementTest {
     StorageRowCapsule storageRowCapsule = storageRowStore.get(new byte[]{});
     assertNotNull(storageRowCapsule);
 
-    DbBackupConfig dbBackupConfig = new DbBackupConfig();
-    dbBackupConfig.initArgs(true, "propPath", "bak1path/", "bak2path/", 1);
-
-    WalletUtils.generateFullNewWalletFile("123456", new File(dbPath));
-    WalletUtils.generateLightNewWalletFile("123456", new File(dbPath));
-    WalletUtils.getDefaultKeyDirectory();
-    WalletUtils.getTestnetKeyDirectory();
-    WalletUtils.getMainnetKeyDirectory();
 
     Value value = new Value(new byte[]{1});
     value.asBytes();
@@ -132,6 +120,20 @@ public class SupplementTest {
     RLP.decode2(new byte[] {1,2,3,4,5,6,7});
     thrown.expect(ClassCastException.class);
     RLP.unwrapList(new byte[] {1,2,3,4,5,6,7});
+  }
+
+  @Test
+  public void testPasswordValid() {
+    assertFalse(passwordValid(EMPTY));
+    assertFalse(passwordValid("12345"));
+    assertTrue(passwordValid("123456"));
+  }
+
+  @Test
+  public void testRun() {
+    TronLogShutdownHook hook = new TronLogShutdownHook();
+    hook.run();
+    assertTrue(true);
   }
 
 }

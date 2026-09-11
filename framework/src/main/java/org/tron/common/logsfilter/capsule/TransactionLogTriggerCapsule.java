@@ -1,11 +1,14 @@
 package org.tron.common.logsfilter.capsule;
 
 import static org.tron.protos.Protocol.Transaction.Contract.ContractType.CreateSmartContract;
+import static org.tron.protos.contract.Common.ResourceCode.ENERGY;
 
 import com.google.protobuf.Any;
 import com.google.protobuf.ByteString;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import lombok.Getter;
 import lombok.Setter;
@@ -26,7 +29,14 @@ import org.tron.protos.Protocol.Transaction;
 import org.tron.protos.Protocol.Transaction.Contract.ContractType;
 import org.tron.protos.Protocol.TransactionInfo;
 import org.tron.protos.contract.AssetIssueContractOuterClass.TransferAssetContract;
+import org.tron.protos.contract.BalanceContract.CancelAllUnfreezeV2Contract;
+import org.tron.protos.contract.BalanceContract.DelegateResourceContract;
+import org.tron.protos.contract.BalanceContract.FreezeBalanceV2Contract;
 import org.tron.protos.contract.BalanceContract.TransferContract;
+import org.tron.protos.contract.BalanceContract.UnDelegateResourceContract;
+import org.tron.protos.contract.BalanceContract.UnfreezeBalanceContract;
+import org.tron.protos.contract.BalanceContract.UnfreezeBalanceV2Contract;
+import org.tron.protos.contract.BalanceContract.WithdrawExpireUnfreezeContract;
 import org.tron.protos.contract.SmartContractOuterClass.CreateSmartContract;
 import org.tron.protos.contract.SmartContractOuterClass.TriggerSmartContract;
 
@@ -41,9 +51,21 @@ public class TransactionLogTriggerCapsule extends TriggerCapsule {
     this(trxCapsule, blockCapsule, 0, 0, 0, null, 0);
   }
 
+  public TransactionLogTriggerCapsule(TransactionCapsule trxCapsule,
+      BlockCapsule blockCapsule, TransactionInfo transactionInfo) {
+    this(trxCapsule, blockCapsule, 0, 0, 0, transactionInfo, 0, true);
+  }
+
   public TransactionLogTriggerCapsule(TransactionCapsule trxCapsule, BlockCapsule blockCapsule,
       int txIndex, long preCumulativeEnergyUsed, long preCumulativeLogCount,
       TransactionInfo transactionInfo, long energyUnitPrice) {
+    this(trxCapsule, blockCapsule, txIndex, preCumulativeEnergyUsed, preCumulativeLogCount,
+        transactionInfo, energyUnitPrice, false);
+  }
+
+  public TransactionLogTriggerCapsule(TransactionCapsule trxCapsule, BlockCapsule blockCapsule,
+      int txIndex, long preCumulativeEnergyUsed, long preCumulativeLogCount,
+      TransactionInfo transactionInfo, long energyUnitPrice, boolean isNewEventService) {
     transactionLogTrigger = new TransactionLogTrigger();
 
     String blockHash = "";
@@ -156,6 +178,88 @@ public class TransactionLogTriggerCapsule extends TriggerCapsule {
                     StringUtil.encode58Check(createSmartContract.getOwnerAddress().toByteArray()));
               }
               break;
+            case UnfreezeBalanceContract:
+              UnfreezeBalanceContract unfreezeBalanceContract = contractParameter
+                  .unpack(UnfreezeBalanceContract.class);
+
+              transactionLogTrigger.setFromAddress(StringUtil
+                  .encode58Check(unfreezeBalanceContract.getOwnerAddress().toByteArray()));
+              if (!ByteString.EMPTY.equals(unfreezeBalanceContract.getReceiverAddress())) {
+                transactionLogTrigger.setToAddress(StringUtil
+                    .encode58Check(unfreezeBalanceContract.getReceiverAddress().toByteArray()));
+              }
+              transactionLogTrigger.setAssetName("trx");
+              if (Objects.nonNull(transactionInfo)) {
+                transactionLogTrigger.setAssetAmount(
+                    transactionInfo.getUnfreezeAmount());
+              }
+              break;
+            case FreezeBalanceV2Contract:
+              FreezeBalanceV2Contract freezeBalanceV2Contract = contractParameter
+                  .unpack(FreezeBalanceV2Contract.class);
+
+              transactionLogTrigger.setFromAddress(StringUtil
+                  .encode58Check(freezeBalanceV2Contract.getOwnerAddress().toByteArray()));
+              transactionLogTrigger.setAssetName("trx");
+              transactionLogTrigger.setAssetAmount(freezeBalanceV2Contract.getFrozenBalance());
+              break;
+            case UnfreezeBalanceV2Contract:
+              UnfreezeBalanceV2Contract unfreezeBalanceV2Contract = contractParameter
+                  .unpack(UnfreezeBalanceV2Contract.class);
+
+              transactionLogTrigger.setFromAddress(StringUtil
+                  .encode58Check(unfreezeBalanceV2Contract.getOwnerAddress().toByteArray()));
+              transactionLogTrigger.setAssetName("trx");
+              transactionLogTrigger.setAssetAmount(
+                  unfreezeBalanceV2Contract.getUnfreezeBalance());
+              break;
+            case WithdrawExpireUnfreezeContract:
+              WithdrawExpireUnfreezeContract withdrawExpireUnfreezeContract = contractParameter
+                  .unpack(WithdrawExpireUnfreezeContract.class);
+
+              transactionLogTrigger.setFromAddress(StringUtil.encode58Check(
+                  withdrawExpireUnfreezeContract.getOwnerAddress().toByteArray()));
+              transactionLogTrigger.setAssetName("trx");
+              if (Objects.nonNull(transactionInfo)) {
+                transactionLogTrigger.setAssetAmount(transactionInfo.getWithdrawExpireAmount());
+              }
+              break;
+            case DelegateResourceContract:
+              DelegateResourceContract delegateResourceContract = contractParameter
+                  .unpack(DelegateResourceContract.class);
+
+              transactionLogTrigger.setFromAddress(StringUtil
+                  .encode58Check(delegateResourceContract.getOwnerAddress().toByteArray()));
+              transactionLogTrigger.setToAddress(StringUtil
+                      .encode58Check(delegateResourceContract.getReceiverAddress().toByteArray()));
+              transactionLogTrigger.setAssetName("trx");
+              transactionLogTrigger.setAssetAmount(
+                      delegateResourceContract.getBalance());
+              break;
+            case UnDelegateResourceContract:
+              UnDelegateResourceContract unDelegateResourceContract = contractParameter
+                  .unpack(UnDelegateResourceContract.class);
+
+              transactionLogTrigger.setFromAddress(StringUtil
+                  .encode58Check(unDelegateResourceContract.getOwnerAddress().toByteArray()));
+              transactionLogTrigger.setToAddress(StringUtil.encode58Check(
+                  unDelegateResourceContract.getReceiverAddress().toByteArray()));
+
+              transactionLogTrigger.setAssetName("trx");
+              transactionLogTrigger.setAssetAmount(
+                    unDelegateResourceContract.getBalance());
+              break;
+            case CancelAllUnfreezeV2Contract:
+              CancelAllUnfreezeV2Contract cancelAllUnfreezeV2Contract = contractParameter
+                  .unpack(CancelAllUnfreezeV2Contract.class);
+
+              transactionLogTrigger.setFromAddress(StringUtil
+                  .encode58Check(cancelAllUnfreezeV2Contract.getOwnerAddress().toByteArray()));
+              transactionLogTrigger.setAssetName("trx");
+              if (Objects.nonNull(transactionInfo)) {
+                transactionLogTrigger.setExtMap(transactionInfo.getCancelUnfreezeV2AmountMap());
+              }
+              break;
             default:
               break;
           }
@@ -191,6 +295,7 @@ public class TransactionLogTriggerCapsule extends TriggerCapsule {
 
       if (Objects.nonNull(contractAddress) && contractAddress.size() > 0) {
         if (Objects.nonNull(transactionInfo)
+            && EventPluginLoader.getInstance().isTransactionLogTriggerEthCompatible()
             && contractType != null && contractType != CreateSmartContract) {
           transactionLogTrigger.setContractAddress(null);
         } else {
@@ -204,8 +309,38 @@ public class TransactionLogTriggerCapsule extends TriggerCapsule {
           getInternalTransactionList(programResult.getInternalTransactions()));
     }
 
+    if (Objects.isNull(trxTrace) && Objects.nonNull(transactionInfo) && isNewEventService) {
+      Protocol.ResourceReceipt receipt = transactionInfo.getReceipt();
+      energyUsageTotal = receipt.getEnergyUsageTotal();
+      transactionLogTrigger.setEnergyFee(receipt.getEnergyFee());
+      transactionLogTrigger.setOriginEnergyUsage(receipt.getOriginEnergyUsage());
+      transactionLogTrigger.setEnergyUsageTotal(energyUsageTotal);
+      transactionLogTrigger.setNetUsage(receipt.getNetUsage());
+      transactionLogTrigger.setNetFee(receipt.getNetFee());
+      transactionLogTrigger.setEnergyUsage(receipt.getEnergyUsage());
+
+      if (transactionInfo.getContractResultCount() > 0) {
+        ByteString contractResult = transactionInfo.getContractResult(0);
+        if (Objects.nonNull(contractResult) && contractResult.size() > 0) {
+          transactionLogTrigger.setContractResult(Hex.toHexString(contractResult.toByteArray()));
+        }
+      }
+
+      ByteString contractAddress = transactionInfo.getContractAddress();
+      if (Objects.nonNull(contractAddress) && contractAddress.size() > 0) {
+        if (EventPluginLoader.getInstance().isTransactionLogTriggerEthCompatible()
+            && contractType != null && contractType != CreateSmartContract) {
+          transactionLogTrigger.setContractAddress(null);
+        } else {
+          transactionLogTrigger
+              .setContractAddress(StringUtil.encode58Check((contractAddress.toByteArray())));
+        }
+      }
+    }
+
     // process transactionInfo list, only enabled when ethCompatible is true
-    if (Objects.nonNull(transactionInfo)) {
+    if (Objects.nonNull(transactionInfo)
+        && EventPluginLoader.getInstance().isTransactionLogTriggerEthCompatible()) {
       transactionLogTrigger.setTransactionIndex(txIndex);
       transactionLogTrigger.setCumulativeEnergyUsed(preCumulativeEnergyUsed + energyUsageTotal);
       transactionLogTrigger.setPreCumulativeLogCount(preCumulativeLogCount);
@@ -242,6 +377,10 @@ public class TransactionLogTriggerCapsule extends TriggerCapsule {
     transactionLogTrigger.setLatestSolidifiedBlockNumber(latestSolidifiedBlockNumber);
   }
 
+  public void setRemoved(boolean removed) {
+    transactionLogTrigger.setRemoved(removed);
+  }
+
   private List<InternalTransactionPojo> getInternalTransactionList(
       List<InternalTransaction> internalTransactionList) {
     List<InternalTransactionPojo> pojoList = new ArrayList<>();
@@ -269,4 +408,5 @@ public class TransactionLogTriggerCapsule extends TriggerCapsule {
   public void processTrigger() {
     EventPluginLoader.getInstance().postTransactionTrigger(transactionLogTrigger);
   }
+
 }

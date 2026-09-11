@@ -1,5 +1,8 @@
 package org.tron.common.utils;
 
+import static org.tron.common.math.Maths.addExact;
+import static org.tron.common.math.Maths.subtractExact;
+
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.tron.common.parameter.CommonParameter;
@@ -17,6 +20,8 @@ import org.tron.core.store.ExchangeV2Store;
 public class Commons {
 
   public static final int ASSET_ISSUE_COUNT_LIMIT_MAX = 1000;
+
+  public static final int BASE58_ADDRESS_LENGTH = 34;
 
   public static byte[] decode58Check(String input) {
     byte[] decodeCheck = Base58.decode(input);
@@ -38,9 +43,16 @@ public class Commons {
     return null;
   }
 
+  /**
+   * Decode a Base58Check address string to its 21-byte form.
+   */
   public static byte[] decodeFromBase58Check(String addressBase58) {
     if (StringUtils.isEmpty(addressBase58)) {
-      logger.warn("Warning: Address is empty !!");
+      logger.debug("address is empty !!");
+      return null;
+    }
+    if (addressBase58.length() != BASE58_ADDRESS_LENGTH) {
+      logger.debug("invalid Base58 address length");
       return null;
     }
     byte[] address = decode58Check(addressBase58);
@@ -55,16 +67,18 @@ public class Commons {
     return address;
   }
 
-  public static void adjustBalance(AccountStore accountStore, byte[] accountAddress, long amount)
+  public static void adjustBalance(AccountStore accountStore, byte[] accountAddress, long amount,
+                                   boolean useStrict)
       throws BalanceInsufficientException {
     AccountCapsule account = accountStore.getUnchecked(accountAddress);
-    adjustBalance(accountStore, account, amount);
+    adjustBalance(accountStore, account, amount, useStrict);
   }
 
   /**
    * judge balance.
    */
-  public static void adjustBalance(AccountStore accountStore, AccountCapsule account, long amount)
+  public static void adjustBalance(AccountStore accountStore, AccountCapsule account, long amount,
+                                   boolean useStrict)
       throws BalanceInsufficientException {
 
     long balance = account.getBalance();
@@ -77,7 +91,7 @@ public class Commons {
           String.format("%s insufficient balance, balance: %d, amount: %d",
               StringUtil.createReadableString(account.createDbKey()), balance, -amount));
     }
-    account.setBalance(Math.addExact(balance, amount));
+    account.setBalance(addExact(balance, amount, useStrict));
     accountStore.put(account.getAddress().toByteArray(), account);
   }
 
@@ -137,8 +151,9 @@ public class Commons {
 
   public static void adjustTotalShieldedPoolValue(long valueBalance,
       DynamicPropertiesStore dynamicPropertiesStore) throws BalanceInsufficientException {
-    long totalShieldedPoolValue = Math
-        .subtractExact(dynamicPropertiesStore.getTotalShieldedPoolValue(), valueBalance);
+    long totalShieldedPoolValue = subtractExact(
+        dynamicPropertiesStore.getTotalShieldedPoolValue(), valueBalance,
+        dynamicPropertiesStore.disableJavaLangMath());
     if (totalShieldedPoolValue < 0) {
       throw new BalanceInsufficientException(String.format(
           "total shielded pool value can not below 0, actual: %d", totalShieldedPoolValue));

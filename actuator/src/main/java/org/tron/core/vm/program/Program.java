@@ -1,14 +1,21 @@
 package org.tron.core.vm.program;
 
-import static java.lang.StrictMath.min;
 import static java.lang.String.format;
 import static org.apache.commons.lang3.ArrayUtils.EMPTY_BYTE_ARRAY;
 import static org.apache.commons.lang3.ArrayUtils.getLength;
 import static org.apache.commons.lang3.ArrayUtils.isEmpty;
 import static org.apache.commons.lang3.ArrayUtils.isNotEmpty;
 import static org.apache.commons.lang3.ArrayUtils.nullToEmpty;
+import static org.tron.common.math.Maths.addExact;
+import static org.tron.common.math.Maths.max;
+import static org.tron.common.math.Maths.min;
+import static org.tron.common.math.Maths.multiplyExact;
 import static org.tron.common.utils.ByteUtil.stripLeadingZeroes;
 import static org.tron.core.config.Parameter.ChainConstant.TRX_PRECISION;
+import static org.tron.protos.contract.Common.ResourceCode.BANDWIDTH;
+import static org.tron.protos.contract.Common.ResourceCode.ENERGY;
+import static org.tron.protos.contract.Common.ResourceCode.TRON_POWER;
+import static org.tron.protos.contract.Common.ResourceCode.UNRECOGNIZED;
 
 import com.google.protobuf.ByteString;
 import java.math.BigInteger;
@@ -155,11 +162,13 @@ public class Program {
     this.nonce = internalTransaction.getNonce();
   }
 
+  @SuppressWarnings("unused")
   static String formatBinData(byte[] binData, int startPC) {
     StringBuilder ret = new StringBuilder();
     for (int i = 0; i < binData.length; i += 16) {
       ret.append(Utils.align("" + Integer.toHexString(startPC + (i)) + ":", ' ', 8, false));
-      ret.append(Hex.toHexString(binData, i, min(16, binData.length - i))).append('\n');
+      ret.append(Hex.toHexString(binData, i, min(16, binData.length - i,
+          VMConfig.disableJavaLangMath()))).append('\n');
     }
     return ret.toString();
   }
@@ -269,6 +278,10 @@ public class Program {
    */
   public void setLastOp(byte op) {
     this.lastOp = op;
+  }
+
+  public byte getLastOp() {
+    return this.lastOp;
   }
 
   /**
@@ -421,6 +434,10 @@ public class Program {
     return memory.read(offset, size);
   }
 
+  public void memoryCopy(int dst, int src, int size) {
+    memory.copy(dst, src, size);
+  }
+
   /**
    * . Allocates extra memory in the program for a specified size, calculated from a given offset
    *
@@ -453,7 +470,8 @@ public class Program {
     InternalTransaction internalTx = addInternalTx(null, owner, obtainer, balance, null,
         "suicide", nonce, getContractState().getAccount(owner).getAssetMapV2());
 
-    if (FastByteComparisons.compareTo(owner, 0, 20, obtainer, 0, 20) == 0) {
+    int ADDRESS_SIZE = VMUtils.getAddressSize();
+    if (FastByteComparisons.compareTo(owner, 0, ADDRESS_SIZE, obtainer, 0, ADDRESS_SIZE) == 0) {
       // if owner == obtainer just zeroing account according to Yellow Paper
       getContractState().addBalance(owner, -balance);
       byte[] blackHoleAddress = getContractState().getBlackHoleAddress();
@@ -494,7 +512,82 @@ public class Program {
         internalTx.setValue(internalTx.getValue() + expireUnfrozenBalance);
       }
     }
+
+    getContractState().markSelfDestruct(owner);
     getResult().addDeleteAccount(this.getContractAddress());
+  }
+
+  public void suicide2(DataWord obtainerAddress) {
+    byte[] owner = getContextAddress();
+
+    if (getContractState().isSelfDestructed(obtainerAddress.toTronAddress())) {
+      MUtil.checkCPUTimeForSelfDestructedBeneficiary();
+    }
+
+    boolean isNewContract = getContractState().isNewContract(owner);
+    if (isNewContract) {
+      suicide(obtainerAddress);
+      return;
+    }
+
+    byte[] obtainer = obtainerAddress.toTronAddress();
+
+    long balance = getContractState().getBalance(owner);
+
+    if (logger.isDebugEnabled()) {
+      logger.debug("Transfer to: [{}] heritage: [{}]",
+          Hex.toHexString(obtainer),
+          balance);
+    }
+
+    increaseNonce();
+
+    InternalTransaction internalTx = addInternalTx(null, owner, obtainer, balance, null,
+        "suicide", nonce, getContractState().getAccount(owner).getAssetMapV2());
+
+    if (FastByteComparisons.isEqual(owner, obtainer)) {
+      getContractState().markSelfDestruct(owner);
+      return;
+    }
+
+    if (VMConfig.allowTvmVote()) {
+      withdrawRewardAndCancelVote(owner, getContractState());
+      balance = getContractState().getBalance(owner);
+      if (internalTx != null && balance != internalTx.getValue()) {
+        internalTx.setValue(balance);
+      }
+    }
+
+    // transfer balance and trc10
+    createAccountIfNotExist(getContractState(), obtainer);
+    try {
+      MUtil.transfer(getContractState(), owner, obtainer, balance);
+      if (VMConfig.allowTvmTransferTrc10()) {
+        MUtil.transferAllToken(getContractState(), owner, obtainer);
+      }
+    } catch (ContractValidateException e) {
+      if (VMConfig.allowTvmConstantinople()) {
+        throw new TransferException(
+            "transfer all token or transfer all trx failed in suicide: %s", e.getMessage());
+      }
+      throw new BytecodeExecutionException("transfer failure");
+    }
+
+    // transfer freeze
+    if (VMConfig.allowTvmFreeze()) {
+      transferDelegatedResourceToInheritor(owner, obtainer, getContractState());
+    }
+
+    // transfer freezeV2
+    if (VMConfig.allowTvmFreezeV2()) {
+      long expireUnfrozenBalance =
+          transferFrozenV2BalanceToInheritor(owner, obtainer, getContractState());
+      if (expireUnfrozenBalance > 0 && internalTx != null) {
+        internalTx.setValue(internalTx.getValue() + expireUnfrozenBalance);
+      }
+    }
+
+    getContractState().markSelfDestruct(owner);
   }
 
   public Repository getContractState() {
@@ -526,6 +619,11 @@ public class Program {
 
     // transfer all kinds of frozen balance to BlackHole
     repo.addBalance(inheritorAddr, frozenBalanceForBandwidthOfOwner + frozenBalanceForEnergyOfOwner);
+
+    if (VMConfig.allowTvmSelfdestructRestriction()) {
+      clearOwnerFreeze(ownerCapsule);
+      repo.updateAccount(ownerAddr, ownerCapsule);
+    }
   }
 
   private long transferFrozenV2BalanceToInheritor(byte[] ownerAddr, byte[] inheritorAddr, Repository repo) {
@@ -556,15 +654,8 @@ public class Program {
     bandwidthProcessor.updateUsageForDelegated(ownerCapsule);
     ownerCapsule.setLatestConsumeTime(now);
     if (ownerCapsule.getNetUsage() > 0) {
-      long newNetUsage =
-          bandwidthProcessor.unDelegateIncrease(
-              inheritorCapsule,
-              ownerCapsule,
-              ownerCapsule.getNetUsage(),
-              Common.ResourceCode.BANDWIDTH,
-              now);
-      inheritorCapsule.setNetUsage(newNetUsage);
-      inheritorCapsule.setLatestConsumeTime(now);
+      bandwidthProcessor.unDelegateIncrease(inheritorCapsule, ownerCapsule,
+          ownerCapsule.getNetUsage(), BANDWIDTH, now);
     }
 
     EnergyProcessor energyProcessor =
@@ -573,15 +664,8 @@ public class Program {
     energyProcessor.updateUsage(ownerCapsule);
     ownerCapsule.setLatestConsumeTimeForEnergy(now);
     if (ownerCapsule.getEnergyUsage() > 0) {
-      long newEnergyUsage =
-          energyProcessor.unDelegateIncrease(
-              inheritorCapsule,
-              ownerCapsule,
-              ownerCapsule.getEnergyUsage(),
-              Common.ResourceCode.ENERGY,
-              now);
-      inheritorCapsule.setEnergyUsage(newEnergyUsage);
-      inheritorCapsule.setLatestConsumeTimeForEnergy(now);
+      energyProcessor.unDelegateIncrease(inheritorCapsule, ownerCapsule,
+          ownerCapsule.getEnergyUsage(), ENERGY, now);
     }
 
     // withdraw expire unfrozen balance
@@ -605,12 +689,17 @@ public class Program {
     return expireUnfrozenBalance;
   }
 
+  private void clearOwnerFreeze(AccountCapsule ownerCapsule) {
+    ownerCapsule.setFrozenForBandwidth(0, 0);
+    ownerCapsule.setFrozenForEnergy(0, 0);
+  }
+
   private void clearOwnerFreezeV2(AccountCapsule ownerCapsule) {
     ownerCapsule.clearFrozenV2();
     ownerCapsule.setNetUsage(0);
-    ownerCapsule.setNewWindowSize(Common.ResourceCode.BANDWIDTH, 0);
+    ownerCapsule.setNewWindowSize(BANDWIDTH, 0);
     ownerCapsule.setEnergyUsage(0);
-    ownerCapsule.setNewWindowSize(Common.ResourceCode.ENERGY, 0);
+    ownerCapsule.setNewWindowSize(ENERGY, 0);
     ownerCapsule.clearUnfrozenV2();
   }
 
@@ -634,7 +723,7 @@ public class Program {
       long balance = ownerCapsule.getBalance();
       long allowance = ownerCapsule.getAllowance();
       ownerCapsule.setInstance(ownerCapsule.getInstance().toBuilder()
-          .setBalance(Math.addExact(balance, allowance))
+          .setBalance(addExact(balance, allowance, VMConfig.disableJavaLangMath()))
           .setAllowance(0)
           .setLatestWithdrawTime(getTimestamp().longValue() * 1000)
           .build());
@@ -660,6 +749,38 @@ public class Program {
 //        && getContractState().getAccountVote(
 //            getContractState().getBeginCycle(owner), owner) == null);
 //    return freezeCheck && voteCheck;
+  }
+
+  public boolean canSuicide2() {
+    byte[] owner = getContextAddress();
+    AccountCapsule accountCapsule = getContractState().getAccount(owner);
+
+    return freezeV1Check(accountCapsule) && freezeV2Check(accountCapsule);
+  }
+
+  private boolean freezeV1Check(AccountCapsule accountCapsule) {
+    if (!VMConfig.allowTvmFreeze()) {
+      return true;
+    }
+
+    // check freeze
+    long now = getContractState().getDynamicPropertiesStore().getLatestBlockHeaderTimestamp();
+    // bandwidth
+    if (accountCapsule.getFrozenCount() > 0
+        && accountCapsule.getFrozenList().stream()
+        .anyMatch(frozen -> frozen.getExpireTime() > now)) {
+      return false;
+    }
+    // energy
+    Protocol.Account.Frozen frozenEnergy =
+        accountCapsule.getAccountResource().getFrozenBalanceForEnergy();
+    if (frozenEnergy.getFrozenBalance() > 0 && frozenEnergy.getExpireTime() > now) {
+      return false;
+    }
+
+    // check delegate
+    return accountCapsule.getDelegatedFrozenBalanceForBandwidth() == 0
+        && accountCapsule.getDelegatedFrozenBalanceForEnergy() == 0;
   }
 
   private boolean freezeV2Check(AccountCapsule accountCapsule) {
@@ -802,7 +923,8 @@ public class Program {
       if (VMConfig.allowTvmCompatibleEvm()) {
         program.setContractVersion(getContractVersion());
       }
-      VM.play(program, OperationRegistry.getTable());
+      // Reuse the table prepared by the top-level execution.
+      VM.play(program, OperationRegistry.getTable(isConstantCall()));
       createResult = program.getResult();
       getTrace().merge(program.getTrace());
       // always commit nonce
@@ -1034,7 +1156,8 @@ public class Program {
         program.setContractVersion(invoke.getDeposit()
             .getContract(codeAddress).getContractVersion());
       }
-      VM.play(program, OperationRegistry.getTable());
+      // Reuse the table prepared by the top-level execution.
+      VM.play(program, OperationRegistry.getTable(isConstantCall()));
       callResult = program.getResult();
 
       getTrace().merge(program.getTrace());
@@ -1232,7 +1355,8 @@ public class Program {
 
   public DataWord getBlockHash(int index) {
     if (index < this.getNumber().longValue()
-        && index >= Math.max(256, this.getNumber().longValue()) - 256) {
+        && index >= max(256, this.getNumber().longValue(),
+        VMConfig.disableJavaLangMath()) - 256) {
 
       BlockCapsule blockCapsule = contractState.getBlockByNum(index);
 
@@ -1503,10 +1627,18 @@ public class Program {
   }
 
   public void createContract2(DataWord value, DataWord memStart, DataWord memSize, DataWord salt) {
+    if (VMConfig.allowTvmOsaka()) {
+      returnDataBuffer = null; // reset return buffer right before the call
+    }
+
     byte[] senderAddress;
-    if (VMConfig.allowTvmCompatibleEvm() && getCallDeep() == MAX_DEPTH) {
+    if ((VMConfig.allowTvmCompatibleEvm() || VMConfig.allowTvmOsaka())
+        && getCallDeep() == MAX_DEPTH) {
       stackPushZero();
       return;
+    }
+    if (getCallDeep() == MAX_DEPTH) {
+      MUtil.checkCPUTimeForCreate2();
     }
     if (VMConfig.allowTvmIstanbul()) {
       senderAddress = getContextAddress();
@@ -1633,7 +1765,11 @@ public class Program {
         }
       }
 
-      this.memorySave(msg.getOutDataOffs().intValue(), out.getRight());
+      if (VMConfig.allowTvmSelfdestructRestriction()) {
+        this.memorySave(msg.getOutDataOffs().intValueSafe(), msg.getOutDataSize().intValueSafe(), out.getRight());
+      } else {
+        this.memorySave(msg.getOutDataOffs().intValue(), out.getRight());
+      }
     }
   }
 
@@ -2001,13 +2137,22 @@ public class Program {
 
       CancelAllUnfreezeV2Processor processor = new CancelAllUnfreezeV2Processor();
       processor.validate(param, repository);
-      long withdrawExpireBalance = processor.execute(param, repository);
+      Map<String, Long> result = processor.execute(param, repository);
       repository.commit();
-      if (withdrawExpireBalance > 0) {
+
+      if (result.get(VMConstant.WITHDRAW_EXPIRE_BALANCE) > 0) {
         increaseNonce();
-        addInternalTx(null, owner, owner, withdrawExpireBalance, null,
+        addInternalTx(null, owner, owner, result.get(VMConstant.WITHDRAW_EXPIRE_BALANCE), null,
             "withdrawExpireUnfreezeWhileCanceling", nonce, null);
       }
+
+      if (internalTx != null && CommonParameter.getInstance().saveCancelAllUnfreezeV2Details) {
+        internalTx.setExtra(String.format("{\"%s\":%d,\"%s\":%d,\"%s\":%d}",
+            BANDWIDTH.name(), result.getOrDefault(BANDWIDTH.name(), 0L),
+            ENERGY.name(), result.getOrDefault(ENERGY.name(), 0L),
+            TRON_POWER.name(), result.getOrDefault(TRON_POWER.name(), 0L)));
+      }
+
       return true;
     } catch (ContractValidateException e) {
       logger.warn("TVM CancelAllUnfreezeV2: validate failure. Reason: {}", e.getMessage());
@@ -2091,11 +2236,11 @@ public class Program {
   private Common.ResourceCode parseResourceCode(DataWord resourceType) {
     switch (resourceType.intValue()) {
       case 0:
-        return Common.ResourceCode.BANDWIDTH;
+        return BANDWIDTH;
       case 1:
-        return Common.ResourceCode.ENERGY;
+        return ENERGY;
       default:
-        return Common.ResourceCode.UNRECOGNIZED;
+        return UNRECOGNIZED;
     }
   }
 
@@ -2104,13 +2249,13 @@ public class Program {
       byte type = resourceType.sValue().byteValueExact();
       switch (type) {
         case 0:
-          return Common.ResourceCode.BANDWIDTH;
+          return BANDWIDTH;
         case 1:
-          return Common.ResourceCode.ENERGY;
+          return ENERGY;
         case 2:
-          return Common.ResourceCode.TRON_POWER;
+          return TRON_POWER;
         default:
-          return Common.ResourceCode.UNRECOGNIZED;
+          return UNRECOGNIZED;
       }
     } catch (ArithmeticException e) {
       logger.warn("TVM ParseResourceCodeV2: invalid resource code: {}", resourceType.sValue());
@@ -2156,11 +2301,12 @@ public class Program {
     try {
       VoteWitnessParam param = new VoteWitnessParam();
       param.setVoterAddress(owner);
-
-      byte[] witnessArrayData = memoryChunk(Math.addExact(witnessArrayOffset, DataWord.WORD_SIZE),
-          Math.multiplyExact(witnessArrayLength, DataWord.WORD_SIZE));
-      byte[] amountArrayData = memoryChunk(Math.addExact(amountArrayOffset, DataWord.WORD_SIZE),
-          Math.multiplyExact(amountArrayLength, DataWord.WORD_SIZE));
+      byte[] witnessArrayData = memoryChunk(
+          addExact(witnessArrayOffset, DataWord.WORD_SIZE,  VMConfig.disableJavaLangMath()),
+          multiplyExact(witnessArrayLength, DataWord.WORD_SIZE,  VMConfig.disableJavaLangMath()));
+      byte[] amountArrayData = memoryChunk(
+          addExact(amountArrayOffset, DataWord.WORD_SIZE,  VMConfig.disableJavaLangMath()),
+          multiplyExact(amountArrayLength, DataWord.WORD_SIZE,  VMConfig.disableJavaLangMath()));
 
       for (int i = 0; i < witnessArrayLength; i++) {
         DataWord witness = new DataWord(Arrays.copyOfRange(witnessArrayData,
@@ -2235,7 +2381,9 @@ public class Program {
           contractState.getDynamicPropertiesStore().getCurrentCycleNumber(),
           VMConfig.getDynamicEnergyThreshold(),
           VMConfig.getDynamicEnergyIncreaseFactor(),
-          VMConfig.getDynamicEnergyMaxFactor())) {
+          VMConfig.getDynamicEnergyMaxFactor(),
+          VMConfig.allowStrictMath(),
+          VMConfig.disableJavaLangMath())) {
         contractState.updateContractState(getContextAddress(), contractStateCapsule
         );
       }

@@ -6,7 +6,6 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -18,6 +17,8 @@ import org.tron.common.backup.BackupManager;
 import org.tron.common.backup.BackupManager.BackupStatusEnum;
 import org.tron.common.crypto.SignInterface;
 import org.tron.common.crypto.SignUtils;
+import org.tron.common.es.ExecutorServiceManager;
+import org.tron.common.log.layout.DesensitizedConverter;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.common.utils.ByteArray;
 import org.tron.common.utils.Sha256Hash;
@@ -34,10 +35,13 @@ import org.tron.core.net.peer.PeerConnection;
 import org.tron.core.store.WitnessScheduleStore;
 import org.tron.p2p.connection.Channel;
 import org.tron.protos.Protocol;
+import org.tron.protos.Protocol.ReasonCode;
 
 @Slf4j(topic = "net")
 @Component
 public class RelayService {
+
+  private static final int MAX_PEER_COUNT_PER_ADDRESS = 5;
 
   @Autowired
   private ChainBaseManager chainBaseManager;
@@ -53,18 +57,20 @@ public class RelayService {
   private WitnessScheduleStore witnessScheduleStore;
 
   private BackupManager backupManager;
+  private final String esName = "relay-service";
 
-  private ScheduledExecutorService executorService = Executors.newSingleThreadScheduledExecutor();
+  private ScheduledExecutorService executorService = ExecutorServiceManager
+      .newSingleThreadScheduledExecutor(esName);
 
   private CommonParameter parameter = Args.getInstance();
 
   private List<InetSocketAddress> fastForwardNodes = parameter.getFastForwardNodes();
 
-  private ByteString witnessAddress = ByteString
-      .copyFrom(Args.getLocalWitnesses().getWitnessAccountAddress(CommonParameter.getInstance()
-          .isECKeyCryptoEngine()));
+  private final int keySize = Args.getLocalWitnesses().getPrivateKeys().size();
 
-  private int keySize = Args.getLocalWitnesses().getPrivateKeys().size();
+  private final ByteString witnessAddress =
+      Args.getLocalWitnesses().getWitnessAccountAddress() != null ? ByteString
+          .copyFrom(Args.getLocalWitnesses().getWitnessAccountAddress()) : null;
 
   private int maxFastForwardNum = Args.getInstance().getMaxFastForwardNum();
 
@@ -95,7 +101,7 @@ public class RelayService {
   }
 
   public void close() {
-    executorService.shutdown();
+    ExecutorServiceManager.shutdownAndAwaitTermination(executorService, esName);
   }
 
   public void fillHelloMessage(HelloMessage message, Channel channel) {
@@ -136,6 +142,20 @@ public class RelayService {
       return false;
     }
 
+    if (getPeerCountByAddress(msg.getAddress()) > MAX_PEER_COUNT_PER_ADDRESS) {
+      logger.warn("HelloMessage from {}, the number of peers of {} exceeds {}.",
+          channel.getInetAddress(),
+          ByteArray.toHexString(msg.getAddress().toByteArray()),
+          MAX_PEER_COUNT_PER_ADDRESS);
+      return false;
+    }
+
+    if (!SignUtils.isValidLength(msg.getSignature().size())) {
+      logger.warn("HelloMessage from {}, signature size is {}.",
+          channel.getInetAddress(), msg.getSignature().size());
+      return false;
+    }
+
     boolean flag;
     try {
       Sha256Hash hash = Sha256Hash.of(CommonParameter
@@ -153,12 +173,20 @@ public class RelayService {
       }
       if (flag) {
         TronNetService.getP2pConfig().getTrustNodes().add(channel.getInetAddress());
+        DesensitizedConverter.addSensitive(channel.getInetAddress().toString().substring(1),
+            ByteArray.toHexString(msg.getAddress().toByteArray()));
       }
       return flag;
     } catch (Exception e) {
       logger.error("Check hello message failed, msg: {}, {}", message, channel.getInetAddress(), e);
       return false;
     }
+  }
+
+  private long getPeerCountByAddress(ByteString address) {
+    return tronNetDelegate.getActivePeer().stream()
+      .filter(peer -> peer.getAddress() != null && peer.getAddress().equals(address))
+      .count();
   }
 
   private boolean isActiveWitness() {
@@ -182,6 +210,7 @@ public class RelayService {
       TronNetService.getP2pConfig().getActiveNodes().remove(address);
       TronNetService.getPeers().forEach(peer -> {
         if (peer.getInetAddress().equals(address.getAddress())) {
+          peer.disconnect(ReasonCode.NOT_WITNESS);
           peer.getChannel().close();
         }
       });

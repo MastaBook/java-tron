@@ -51,10 +51,15 @@ public class NativeMessageQueue {
   public void stop() {
     if (Objects.nonNull(publisher)) {
       publisher.close();
+      publisher = null;
     }
 
     if (Objects.nonNull(context)) {
       context.close();
+      context = null;
+    }
+    synchronized (NativeMessageQueue.class) {
+      instance = null;
     }
   }
 
@@ -64,8 +69,10 @@ public class NativeMessageQueue {
     }
 
     try {
-      publisher.sendMore(topic);
-      publisher.send(data);
+      synchronized (this) {
+        publisher.sendMore(topic);
+        publisher.send(data);
+      }
     } catch (RuntimeException e) {
       logger.error("write data to zeromq failed, data:{}, topic:{}, error:{}", data, topic,
           e.getMessage());

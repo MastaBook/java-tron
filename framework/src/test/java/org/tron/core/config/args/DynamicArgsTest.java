@@ -1,52 +1,39 @@
 package org.tron.core.config.args;
 
 import java.io.File;
-import org.junit.After;
 import org.junit.Assert;
-import org.junit.Before;
 import org.junit.Test;
-import org.tron.common.application.TronApplicationContext;
+import org.tron.common.BaseMethodTest;
+import org.tron.common.TestConstants;
 import org.tron.common.parameter.CommonParameter;
-import org.tron.common.utils.FileUtil;
 import org.tron.common.utils.ReflectUtils;
-import org.tron.core.Constant;
-import org.tron.core.config.DefaultConfig;
 import org.tron.core.net.TronNetService;
 import org.tron.p2p.P2pConfig;
 
-public class DynamicArgsTest {
-  protected TronApplicationContext context;
+public class DynamicArgsTest extends BaseMethodTest {
   private DynamicArgs dynamicArgs;
-  private String dbPath = "output-dynamic-config-test";
 
-  @Before
-  public void init() {
-    Args.setParam(new String[]{"--output-directory", dbPath},
-        Constant.TEST_CONF);
-    context = new TronApplicationContext(DefaultConfig.class);
+  @Override
+  protected void afterInit() {
     dynamicArgs = context.getBean(DynamicArgs.class);
-
-  }
-
-  @After
-  public void destroy() {
-    Args.clearParam();
-    context.destroy();
-    FileUtil.deleteDir(new File(dbPath));
   }
 
   @Test
   public void start() {
     CommonParameter parameter = Args.getInstance();
+    Assert.assertEquals(TestConstants.TEST_CONF, Args.getConfigFilePath());
     Assert.assertTrue(parameter.isDynamicConfigEnable());
     Assert.assertEquals(600, parameter.getDynamicConfigCheckInterval());
 
     dynamicArgs.init();
+    File configFile = (File) ReflectUtils.getFieldObject(dynamicArgs, "configFile");
+    Assert.assertNotNull(configFile);
+    Assert.assertEquals(TestConstants.TEST_CONF, configFile.getName());
     Assert.assertEquals(0, (long) ReflectUtils.getFieldObject(dynamicArgs, "lastModified"));
 
     TronNetService tronNetService = context.getBean(TronNetService.class);
     ReflectUtils.setFieldValue(tronNetService, "p2pConfig", new P2pConfig());
-    File config = new File(Constant.TESTNET_CONF);
+    File config = new File(Args.getConfigFilePath());
     if (!config.exists()) {
       try {
         config.createNewFile();

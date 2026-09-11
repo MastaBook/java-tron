@@ -1,9 +1,11 @@
 package org.tron.core.db;
 
-import static java.lang.Long.max;
+import static org.tron.common.math.Maths.max;
+import static org.tron.common.math.Maths.min;
 import static org.tron.core.config.Parameter.ChainConstant.BLOCK_PRODUCED_INTERVAL;
 import static org.tron.core.config.Parameter.ChainConstant.TRX_PRECISION;
 
+import java.math.BigInteger;
 import lombok.extern.slf4j.Slf4j;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.core.capsule.AccountCapsule;
@@ -70,19 +72,20 @@ public class EnergyProcessor extends ResourceProcessor {
 
     long result;
     if (totalEnergyAverageUsage > targetTotalEnergyLimit) {
-      result = totalEnergyCurrentLimit * AdaptiveResourceLimitConstants.CONTRACT_RATE_NUMERATOR
-          / AdaptiveResourceLimitConstants.CONTRACT_RATE_DENOMINATOR;
-      // logger.info(totalEnergyAverageUsage + ">" + targetTotalEnergyLimit + "\n" + result);
+      result = scaleByRate(totalEnergyCurrentLimit,
+          AdaptiveResourceLimitConstants.CONTRACT_RATE_NUMERATOR,
+          AdaptiveResourceLimitConstants.CONTRACT_RATE_DENOMINATOR);
     } else {
-      result = totalEnergyCurrentLimit * AdaptiveResourceLimitConstants.EXPAND_RATE_NUMERATOR
-          / AdaptiveResourceLimitConstants.EXPAND_RATE_DENOMINATOR;
-      // logger.info(totalEnergyAverageUsage + "<" + targetTotalEnergyLimit + "\n" + result);
+      result = scaleByRate(totalEnergyCurrentLimit,
+          AdaptiveResourceLimitConstants.EXPAND_RATE_NUMERATOR,
+          AdaptiveResourceLimitConstants.EXPAND_RATE_DENOMINATOR);
     }
-
-    result = Math.min(
-        Math.max(result, totalEnergyLimit),
-        totalEnergyLimit * dynamicPropertiesStore.getAdaptiveResourceLimitMultiplier()
-    );
+    long upperBound = hardenCalculation()
+        ? BigInteger.valueOf(totalEnergyLimit).multiply(BigInteger.valueOf(
+            dynamicPropertiesStore.getAdaptiveResourceLimitMultiplier())).longValueExact()
+        : totalEnergyLimit * dynamicPropertiesStore.getAdaptiveResourceLimitMultiplier();
+    result = min(max(result, totalEnergyLimit, this.disableJavaLangMath()),
+        upperBound, this.disableJavaLangMath());
 
     dynamicPropertiesStore.saveTotalEnergyCurrentLimit(result);
     logger.debug("Adjust totalEnergyCurrentLimit, old: {}, new: {}.",
@@ -148,7 +151,6 @@ public class EnergyProcessor extends ResourceProcessor {
       return 0;
     }
 
-    long energyWeight = frozeBalance / TRX_PRECISION;
     long totalEnergyLimit = dynamicPropertiesStore.getTotalEnergyCurrentLimit();
     long totalEnergyWeight = dynamicPropertiesStore.getTotalEnergyWeight();
     if (dynamicPropertiesStore.allowNewReward() && totalEnergyWeight <= 0) {
@@ -156,16 +158,23 @@ public class EnergyProcessor extends ResourceProcessor {
     } else {
       assert totalEnergyWeight > 0;
     }
+    if (hardenCalculation()) {
+      return calculateGlobalLimitV1(frozeBalance, totalEnergyLimit, totalEnergyWeight);
+    }
+    long energyWeight = frozeBalance / TRX_PRECISION;
     return (long) (energyWeight * ((double) totalEnergyLimit / totalEnergyWeight));
   }
 
   public long calculateGlobalEnergyLimitV2(long frozeBalance) {
-    double energyWeight = (double) frozeBalance / TRX_PRECISION;
     long totalEnergyLimit = dynamicPropertiesStore.getTotalEnergyCurrentLimit();
     long totalEnergyWeight = dynamicPropertiesStore.getTotalEnergyWeight();
     if (totalEnergyWeight == 0) {
       return 0;
     }
+    if (hardenCalculation()) {
+      return calculateGlobalLimitV2(frozeBalance, totalEnergyLimit, totalEnergyWeight);
+    }
+    double energyWeight = (double) frozeBalance / TRX_PRECISION;
     return (long) (energyWeight * ((double) totalEnergyLimit / totalEnergyWeight));
   }
 
@@ -178,14 +187,22 @@ public class EnergyProcessor extends ResourceProcessor {
 
     long newEnergyUsage = recovery(accountCapsule, ENERGY, energyUsage, latestConsumeTime, now);
 
-    return max(energyLimit - newEnergyUsage, 0); // us
+    return max(energyLimit - newEnergyUsage, 0, this.disableJavaLangMath()); // us
   }
 
   private long getHeadSlot() {
     return getHeadSlot(dynamicPropertiesStore);
   }
 
-
+  private long scaleByRate(long value, long numerator, long denominator) {
+    if (hardenCalculation()) {
+      return BigInteger.valueOf(value)
+          .multiply(BigInteger.valueOf(numerator))
+          .divide(BigInteger.valueOf(denominator))
+          .longValueExact();
+    }
+    return value * numerator / denominator;
+  }
 }
 
 

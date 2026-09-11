@@ -29,6 +29,8 @@ import static org.tron.protos.contract.Common.ResourceCode.ENERGY;
 
 import com.google.protobuf.Any;
 import com.google.protobuf.ByteString;
+
+import java.util.ArrayList;
 import java.util.Arrays;
 import javax.annotation.Resource;
 import lombok.SneakyThrows;
@@ -39,12 +41,17 @@ import org.junit.Before;
 import org.junit.Ignore;
 import org.junit.Test;
 import org.tron.api.GrpcAPI;
+import org.tron.api.GrpcAPI.AccountNetMessage;
 import org.tron.api.GrpcAPI.AssetIssueList;
 import org.tron.api.GrpcAPI.BlockList;
 import org.tron.api.GrpcAPI.ExchangeList;
+import org.tron.api.GrpcAPI.NumberMessage;
+import org.tron.api.GrpcAPI.PricesResponseMessage;
 import org.tron.api.GrpcAPI.ProposalList;
 import org.tron.common.BaseTest;
+import org.tron.common.TestConstants;
 import org.tron.common.crypto.ECKey;
+import org.tron.common.parameter.CommonParameter;
 import org.tron.common.utils.ByteArray;
 import org.tron.common.utils.Utils;
 import org.tron.core.actuator.DelegateResourceActuator;
@@ -62,13 +69,19 @@ import org.tron.core.capsule.ProposalCapsule;
 import org.tron.core.capsule.TransactionCapsule;
 import org.tron.core.capsule.TransactionInfoCapsule;
 import org.tron.core.capsule.TransactionResultCapsule;
+import org.tron.core.capsule.VotesCapsule;
+import org.tron.core.capsule.WitnessCapsule;
 import org.tron.core.config.args.Args;
+import org.tron.core.db2.core.Chainbase;
 import org.tron.core.exception.ContractExeException;
 import org.tron.core.exception.ContractValidateException;
+import org.tron.core.exception.MaintenanceUnavailableException;
 import org.tron.core.exception.NonUniqueObjectException;
 import org.tron.core.store.DynamicPropertiesStore;
 import org.tron.core.utils.ProposalUtil.ProposalType;
 import org.tron.core.utils.TransactionUtil;
+import org.tron.core.vm.config.ConfigLoader;
+import org.tron.core.vm.config.VMConfig;
 import org.tron.core.vm.program.Program;
 import org.tron.protos.Protocol;
 import org.tron.protos.Protocol.Block;
@@ -128,6 +141,7 @@ public class WalletTest extends BaseTest {
   private static Transaction transaction4;
   private static Transaction transaction5;
   private static AssetIssueCapsule Asset1;
+  private static AssetIssueCapsule Asset2;
 
   private static final String OWNER_ADDRESS;
   private static final String RECEIVER_ADDRESS;
@@ -135,8 +149,7 @@ public class WalletTest extends BaseTest {
   private static boolean init;
 
   static {
-    dbPath = "output_wallet_test";
-    Args.setParam(new String[]{"-d", dbPath}, Constant.TEST_CONF);
+    Args.setParam(new String[] {"-d", dbPath()}, TestConstants.TEST_CONF);
     OWNER_ADDRESS = Wallet.getAddressPreFixString() + "548794500882809695a8a687866e76d4271a1abc";
     RECEIVER_ADDRESS = Wallet.getAddressPreFixString() + "abd4b9367799eaa3197fecb144eb71de1e049150";
   }
@@ -149,7 +162,8 @@ public class WalletTest extends BaseTest {
     }
     initTransaction();
     initBlock();
-    chainBaseManager.getDynamicPropertiesStore().saveLatestBlockHeaderNumber(5);
+    chainBaseManager.getDynamicPropertiesStore().saveLatestBlockHeaderNumber(BLOCK_NUM_FIVE);
+    chainBaseManager.getDynamicPropertiesStore().saveLatestSolidifiedBlockNum(BLOCK_NUM_TWO);
     chainBaseManager.getDelegatedResourceStore().reset();
     init = true;
   }
@@ -163,6 +177,7 @@ public class WalletTest extends BaseTest {
         TRANSACTION_TIMESTAMP_ONE, BLOCK_NUM_ONE);
     addTransactionToStore(transaction1);
 
+    // solidified
     transaction2 = getBuildTransaction(
         getBuildTransferContract(ACCOUNT_ADDRESS_TWO, ACCOUNT_ADDRESS_THREE),
         TRANSACTION_TIMESTAMP_TWO, BLOCK_NUM_TWO);
@@ -234,11 +249,11 @@ public class WalletTest extends BaseTest {
   private static Transaction getBuildTransaction(
       TransferContract transferContract, long transactionTimestamp, long refBlockNum) {
     return Transaction.newBuilder().setRawData(
-        Transaction.raw.newBuilder().setTimestamp(transactionTimestamp)
-            .setRefBlockNum(refBlockNum)
-            .addContract(
-                Contract.newBuilder().setType(ContractType.TransferContract)
-                    .setParameter(Any.pack(transferContract)).build()).build())
+            Transaction.raw.newBuilder().setTimestamp(transactionTimestamp)
+                .setRefBlockNum(refBlockNum)
+                .addContract(
+                    Contract.newBuilder().setType(ContractType.TransferContract)
+                        .setParameter(Any.pack(transferContract)).build()).build())
         .build();
   }
 
@@ -281,24 +296,33 @@ public class WalletTest extends BaseTest {
 
   private void addBlockToStore(Block block) {
     BlockCapsule blockCapsule = new BlockCapsule(block);
+    chainBaseManager.getBlockIndexStore().put(blockCapsule.getBlockId());
     chainBaseManager.getBlockStore().put(blockCapsule.getBlockId().getBytes(), blockCapsule);
   }
 
   private static Block getBuildBlock(long timestamp, long num, long witnessId,
       String witnessAddress, Transaction transaction, Transaction transactionNext) {
     return Block.newBuilder().setBlockHeader(BlockHeader.newBuilder().setRawData(
-        raw.newBuilder().setTimestamp(timestamp).setNumber(num).setWitnessId(witnessId)
-            .setWitnessAddress(ByteString.copyFrom(ByteArray.fromHexString(witnessAddress)))
-            .build()).build()).addTransactions(transaction).addTransactions(transactionNext)
+            raw.newBuilder().setTimestamp(timestamp).setNumber(num).setWitnessId(witnessId)
+                .setWitnessAddress(ByteString.copyFrom(ByteArray.fromHexString(witnessAddress)))
+                .build()).build()).addTransactions(transaction).addTransactions(transactionNext)
         .build();
   }
 
 
   private void buildAssetIssue() {
     AssetIssueContract.Builder builder = AssetIssueContract.newBuilder();
+    builder.setOwnerAddress(ByteString.copyFromUtf8("Address1"));
     builder.setName(ByteString.copyFromUtf8("Asset1"));
     Asset1 = new AssetIssueCapsule(builder.build());
     chainBaseManager.getAssetIssueStore().put(Asset1.createDbKey(), Asset1);
+
+    AssetIssueContract.Builder builder2 = AssetIssueContract.newBuilder();
+    builder2.setOwnerAddress(ByteString.copyFromUtf8("Address2"));
+    builder2.setName(ByteString.copyFromUtf8("Asset2"));
+    builder2.setId("id2");
+    Asset2 = new AssetIssueCapsule(builder2.build());
+    chainBaseManager.getAssetIssueV2Store().put(Asset2.getId().getBytes(), Asset2);
   }
 
   private void buildProposal() {
@@ -499,6 +523,52 @@ public class WalletTest extends BaseTest {
   }
 
   @Test
+  public void testGetAssetIssueByAccount() {
+    buildAssetIssue();
+    //
+    AssetIssueList assetIssueList = wallet.getAssetIssueByAccount(
+        ByteString.copyFromUtf8("Address1"));
+    Assert.assertEquals(1, assetIssueList.getAssetIssueCount());
+  }
+
+  @Test
+  public void testGetAssetIssueList() {
+    buildAssetIssue();
+    //
+    AssetIssueList assetIssueList = wallet.getAssetIssueList();
+    Assert.assertEquals(1, assetIssueList.getAssetIssueCount());
+  }
+
+  @Test
+  public void testGetAssetIssueListByName() {
+    buildAssetIssue();
+    //
+    AssetIssueList assetIssueList = wallet.getAssetIssueListByName(
+        ByteString.copyFromUtf8("Asset1"));
+    Assert.assertEquals(1, assetIssueList.getAssetIssueCount());
+  }
+
+  @Test
+  public void testGetAssetIssueById() {
+    buildAssetIssue();
+    //
+    AssetIssueContract assetIssueContract = wallet.getAssetIssueById("id2");
+    Assert.assertNotNull(assetIssueContract);
+  }
+
+  @Test
+  public void testGetAccountNet() {
+    ByteString addressByte = ByteString.copyFrom(ByteArray.fromHexString(OWNER_ADDRESS));
+    AccountCapsule accountCapsule =
+        new AccountCapsule(Protocol.Account.newBuilder().setAddress(addressByte).build());
+    accountCapsule.setBalance(1000_000_000L);
+    dbManager.getChainBaseManager().getAccountStore()
+        .put(accountCapsule.createDbKey(), accountCapsule);
+    AccountNetMessage accountNetMessage = wallet.getAccountNet(addressByte);
+    Assert.assertNotNull(accountNetMessage);
+  }
+
+  @Test
   public void getPaginatedProposalList() {
     buildProposal();
     //
@@ -532,6 +602,16 @@ public class WalletTest extends BaseTest {
   }
 
   @Test
+  public void testGetProposalById() {
+    buildProposal();
+    //
+    Proposal proposal = wallet.getProposalById(ByteString.copyFrom(ByteArray.fromLong(1L)));
+    Assert.assertNotNull(proposal);
+    proposal = wallet.getProposalById(ByteString.copyFrom(ByteArray.fromLong(3L)));
+    Assert.assertNull(proposal);
+  }
+
+  @Test
   public void getPaginatedExchangeList() {
     buildExchange();
     ExchangeList exchangeList = wallet.getPaginatedExchangeList(0, 100);
@@ -539,6 +619,24 @@ public class WalletTest extends BaseTest {
         exchangeList.getExchangesList().get(0).getCreatorAddress().toStringUtf8());
     assertEquals("Address2",
         exchangeList.getExchangesList().get(1).getCreatorAddress().toStringUtf8());
+  }
+
+  @Test
+  public void testGetExchangeById() {
+    buildExchange();
+    //
+    Exchange exchange = wallet.getExchangeById(ByteString.copyFrom(ByteArray.fromLong(1L)));
+    Assert.assertNotNull(exchange);
+    exchange = wallet.getExchangeById(ByteString.copyFrom(ByteArray.fromLong(3L)));
+    Assert.assertNull(exchange);
+  }
+
+  @Test
+  public void testGetExchangeList() {
+    buildExchange();
+    //
+    ExchangeList exchangeList = wallet.getExchangeList();
+    Assert.assertEquals(2, exchangeList.getExchangesCount());
   }
 
   @Test
@@ -565,6 +663,12 @@ public class WalletTest extends BaseTest {
     req = req.toBuilder().clearDetail()
         .setIdOrNum(new BlockCapsule(block).getBlockId().toString()).build();
     assertEquals(block, wallet.getBlock(req));
+  }
+
+  @Test
+  public void testGetNextMaintenanceTime() {
+    NumberMessage numberMessage = wallet.getNextMaintenanceTime();
+    Assert.assertEquals(0, numberMessage.getNum());
   }
 
   //@Test
@@ -651,8 +755,8 @@ public class WalletTest extends BaseTest {
   }
 
   private Any getDelegatedContractForCpu(String ownerAddress, String receiverAddress,
-                                         long frozenBalance,
-                                         long duration) {
+      long frozenBalance,
+      long duration) {
     return Any.pack(
         BalanceContract.FreezeBalanceContract.newBuilder()
             .setOwnerAddress(ByteString.copyFrom(ByteArray.fromHexString(ownerAddress)))
@@ -688,13 +792,13 @@ public class WalletTest extends BaseTest {
   }
 
   private Any getDelegateContractForBandwidth(String ownerAddress, String receiveAddress,
-                                              long unfreezeBalance) {
+      long unfreezeBalance) {
     return getLockedDelegateContractForBandwidth(ownerAddress, receiveAddress,
         unfreezeBalance, false);
   }
 
   private Any getLockedDelegateContractForBandwidth(String ownerAddress, String receiveAddress,
-                                                    long unfreezeBalance, boolean lock) {
+      long unfreezeBalance, boolean lock) {
     return Any.pack(BalanceContract.DelegateResourceContract.newBuilder()
         .setOwnerAddress(ByteString.copyFrom(ByteArray.fromHexString(ownerAddress)))
         .setReceiverAddress(ByteString.copyFrom(ByteArray.fromHexString(receiveAddress)))
@@ -752,6 +856,150 @@ public class WalletTest extends BaseTest {
     } catch (ContractValidateException | ContractExeException e) {
       Assert.fail(e.getMessage());
     }
+  }
+
+  @Test
+  public void testGetPaginatedNowWitnessList_Error() {
+    // To avoid throw MaintenanceClearingException
+    dbManager.getChainBaseManager().getDynamicPropertiesStore().saveStateFlag(1);
+    Exception maintenanceEx = Assert.assertThrows(Exception.class,
+        () -> wallet.getPaginatedNowWitnessList(0, 10));
+    Assert.assertTrue("Should throw MaintenanceClearingException",
+        maintenanceEx instanceof MaintenanceUnavailableException);
+
+    try {
+      Args.getInstance().setSolidityNode(true);
+      wallet.getPaginatedNowWitnessList(0, 10);
+      Args.getInstance().setSolidityNode(false);
+
+      dbManager.setCursor(Chainbase.Cursor.SOLIDITY);
+      wallet.getPaginatedNowWitnessList(0, 10);
+      dbManager.setCursor(Chainbase.Cursor.HEAD);
+    } catch (Exception e) {
+      Assert.assertFalse("Should not throw MaintenanceClearingException",
+          e instanceof MaintenanceUnavailableException);
+    }
+
+    dbManager.getChainBaseManager().getDynamicPropertiesStore().saveStateFlag(0);
+  }
+
+  @Test
+  public void testGetPaginatedNowWitnessList_CornerCase() {
+    try {
+      // To avoid throw MaintenanceClearingException
+      dbManager.getChainBaseManager().getDynamicPropertiesStore().saveStateFlag(0);
+
+      GrpcAPI.WitnessList witnessList = wallet.getPaginatedNowWitnessList(-100, 0);
+      Assert.assertTrue("Should return an empty witness list when offset is negative",
+          witnessList == null);
+
+      witnessList = wallet.getPaginatedNowWitnessList(100, 0);
+      Assert.assertTrue("Should return an empty witness list when limit is 0", witnessList == null);
+
+      String fakeWitnessAddressPrefix = "fake_witness";
+      int fakeNumberOfWitnesses = 1000 + 10;
+      // Mock additional witnesses with vote counts greater than 1000
+      for (int i = 0; i < fakeNumberOfWitnesses; i++) {
+        saveWitnessWith(fakeWitnessAddressPrefix + i, 200);
+      }
+
+      witnessList = wallet.getPaginatedNowWitnessList(0, 1000000);
+      // Check the returned witness list should contain 1000 witnesses with descending vote count
+      Assert.assertTrue("Witness list should contain 1000 witnesses",
+          witnessList.getWitnessesCount() == 1000);
+
+      // clean up, delete the fake witnesses
+      for (int i = 0; i < fakeNumberOfWitnesses; i++) {
+        chainBaseManager.getWitnessStore()
+            .delete(ByteString.copyFromUtf8(fakeWitnessAddressPrefix + i).toByteArray());
+      }
+    } catch (MaintenanceUnavailableException e) {
+      Assert.fail(e.getMessage());
+    }
+  }
+
+  @Test
+  public void testGetPaginatedNowWitnessList() {
+    GrpcAPI.WitnessList witnessList = wallet.getWitnessList();
+    logger.info(witnessList.toString());
+
+    // iterate through the witness list and find the existing maximum vote count
+    long maxVoteCount = 0L;
+    for (Protocol.Witness witness : witnessList.getWitnessesList()) {
+      if (witness.getVoteCount() > maxVoteCount) {
+        maxVoteCount = witness.getVoteCount();
+      }
+    }
+    String fakeWitnessAddressPrefix = "fake_witness_address_for_paged_now_witness_list";
+    int fakeNumberOfWitnesses = 10;
+    // Mock additional witnesses with vote counts greater than the maximum
+    for (int i = 0; i < fakeNumberOfWitnesses; i++) {
+      saveWitnessWith(fakeWitnessAddressPrefix + i, maxVoteCount + 1000000L);
+    }
+
+    // Create a VotesCapsule to simulate the votes for the fake witnesses
+    VotesCapsule votesCapsule = new VotesCapsule(ByteString.copyFromUtf8(ACCOUNT_ADDRESS_ONE),
+        new ArrayList<Protocol.Vote>());
+    votesCapsule.addOldVotes(ByteString.copyFromUtf8(fakeWitnessAddressPrefix + 0), 100L);
+    votesCapsule.addOldVotes(ByteString.copyFromUtf8(fakeWitnessAddressPrefix + 1), 50L);
+    votesCapsule.addNewVotes(ByteString.copyFromUtf8(fakeWitnessAddressPrefix + 2), 200L);
+    votesCapsule.addNewVotes(ByteString.copyFromUtf8(fakeWitnessAddressPrefix + 3), 300L);
+    chainBaseManager.getVotesStore().put(votesCapsule.createDbKey(), votesCapsule);
+
+    logger.info("now request paginated witness list with 0 offset and 10 limit:");
+    GrpcAPI.WitnessList witnessList2 = null;
+    try {
+      // To avoid throw MaintenanceClearingException
+      dbManager.getChainBaseManager().getDynamicPropertiesStore().saveStateFlag(0);
+      witnessList2 = wallet.getPaginatedNowWitnessList(0, 10);
+    } catch (MaintenanceUnavailableException e) {
+      Assert.fail(e.getMessage());
+    }
+    // Check the returned witness list should contain 10 witnesses with descending vote count
+    Assert.assertTrue("Witness list should contain 10 witnesses",
+        witnessList2.getWitnessesCount() == 10);
+    // Check the first witness should have the maximum vote count
+    Assert.assertEquals("The first witness should have the maximum vote count",
+        fakeWitnessAddressPrefix + 3, witnessList2.getWitnesses(0).getAddress().toStringUtf8());
+    Assert.assertEquals(maxVoteCount + 1000300L, witnessList2.getWitnesses(0).getVoteCount());
+    // Check the second witness should have the second maximum vote count
+    Assert.assertEquals("The second witness", fakeWitnessAddressPrefix + 2,
+        witnessList2.getWitnesses(1).getAddress().toStringUtf8());
+    Assert.assertEquals(maxVoteCount + 1000200L, witnessList2.getWitnesses(1).getVoteCount());
+    // Check the last witness should have the least vote count
+    Assert.assertEquals("The tenth witness", fakeWitnessAddressPrefix + 0,
+        witnessList2.getWitnesses(9).getAddress().toStringUtf8());
+    Assert.assertEquals(maxVoteCount + 1000000L - 100L,
+        witnessList2.getWitnesses(9).getVoteCount());
+
+
+    logger.info("after paged");
+    GrpcAPI.WitnessList witnessList3 = wallet.getWitnessList();
+    // Check the witness list should remain unchanged after paged request
+    for (Protocol.Witness witness : witnessList3.getWitnessesList()) {
+      if (witness.getVoteCount() > maxVoteCount) {
+        Assert.assertTrue("Check the witness list should remain unchanged after paged request",
+            witness.getVoteCount() == maxVoteCount + 1000000L);
+      }
+    }
+
+    // clean up, delete the fake witnesses
+    for (int i = 0; i < fakeNumberOfWitnesses; i++) {
+      chainBaseManager.getWitnessStore()
+          .delete(ByteString.copyFromUtf8(fakeWitnessAddressPrefix + i).toByteArray());
+    }
+    chainBaseManager.getVotesStore().delete(votesCapsule.createDbKey());
+    Assert.assertTrue("Clean up the mocked witness data",
+        wallet.getWitnessList().getWitnessesCount() == witnessList.getWitnessesCount());
+
+  }
+
+  public void saveWitnessWith(String witnessAddress, long voteCount) {
+    WitnessCapsule witness = new WitnessCapsule(
+        Protocol.Witness.newBuilder()
+            .setAddress(ByteString.copyFromUtf8(witnessAddress)) // Convert String to ByteString
+            .setVoteCount(voteCount).build());
+    chainBaseManager.getWitnessStore().put(witness.getAddress().toByteArray(), witness);
   }
 
   @Test
@@ -895,8 +1143,8 @@ public class WalletTest extends BaseTest {
 
   @Test
   public void testGetMemoFeePrices() {
-    String memeFeeList = wallet.getMemoFeePrices();
-    Assert.assertEquals("0:0", memeFeeList);
+    PricesResponseMessage memeFeeList = wallet.getMemoFeePrices();
+    Assert.assertEquals("0:0", memeFeeList.getPrices());
   }
 
   @Test
@@ -914,7 +1162,7 @@ public class WalletTest extends BaseTest {
     chainBaseManager.getAccountIdIndexStore().put(ownerCapsule);
     Protocol.Account account = wallet.getAccountById(
         Protocol.Account.newBuilder().setAccountId(ByteString.copyFromUtf8("1001")).build());
-    Assert.assertEquals(ownerCapsule.getAddress(),account.getAddress());
+    Assert.assertEquals(ownerCapsule.getAddress(), account.getAddress());
   }
 
   @Test
@@ -932,24 +1180,97 @@ public class WalletTest extends BaseTest {
     String assetName = "My_asset";
     String id = "10001";
     AssetIssueCapsule assetCapsule = new AssetIssueCapsule(ByteArray.fromHexString(OWNER_ADDRESS),
-        id,assetName,"abbr", 1_000_000_000_000L,6);
+        id, assetName, "abbr", 1_000_000_000_000L, 6);
     chainBaseManager.getAssetIssueStore().put(assetCapsule.createDbKey(), assetCapsule);
     chainBaseManager.getAssetIssueV2Store().put(assetCapsule.createDbV2Key(), assetCapsule);
     try {
       AssetIssueContract assetIssue =
           wallet.getAssetIssueByName(ByteString.copyFromUtf8(assetName));
-      Assert.assertEquals(ByteString.copyFromUtf8(assetName),assetIssue.getName());
-      Assert.assertEquals(id,assetIssue.getId());
+      Assert.assertEquals(ByteString.copyFromUtf8(assetName), assetIssue.getName());
+      Assert.assertEquals(id, assetIssue.getId());
       chainBaseManager.getDynamicPropertiesStore().saveAllowSameTokenName(1);
       assetIssue = wallet.getAssetIssueByName(ByteString.copyFromUtf8(assetName));
-      Assert.assertEquals(ByteString.copyFromUtf8(assetName),assetIssue.getName());
-      Assert.assertEquals(id,assetIssue.getId());
+      Assert.assertEquals(ByteString.copyFromUtf8(assetName), assetIssue.getName());
+      Assert.assertEquals(id, assetIssue.getId());
     } catch (NonUniqueObjectException e) {
       Assert.fail(e.getMessage());
     }
     chainBaseManager.getAssetIssueStore().delete(assetCapsule.createDbKey());
     chainBaseManager.getAssetIssueV2Store().delete(assetCapsule.createDbV2Key());
     chainBaseManager.getDynamicPropertiesStore().saveAllowSameTokenName(0);
+  }
+
+  @Test
+  @SneakyThrows
+  public void testTriggerConstant() {
+    boolean preDebug = CommonParameter.getInstance().debug;
+    CommonParameter.getInstance().debug = true;
+    ConfigLoader.disable = true;
+    VMConfig.initAllowTvmTransferTrc10(1);
+    VMConfig.initAllowTvmConstantinople(1);
+    VMConfig.initAllowTvmShangHai(1);
+
+    String contractAddress =
+        Wallet.getAddressPreFixString() + "1A622D84ed49f01045f5f1a5AfcEb9c57e9cC3cc";
+
+    AccountCapsule accountCap = new AccountCapsule(
+        ByteString.copyFrom(ByteArray.fromHexString(contractAddress)),
+        Protocol.AccountType.Normal);
+    dbManager.getAccountStore().put(accountCap.createDbKey(), accountCap);
+
+    SmartContractOuterClass.SmartContract smartContract =
+        SmartContractOuterClass.SmartContract.newBuilder().build();
+    ContractCapsule contractCap = new ContractCapsule(smartContract);
+    dbManager.getContractStore().put(ByteArray.fromHexString(contractAddress), contractCap);
+
+    String codeString = "608060405234801561000f575f80fd5b50d3801561001b575f80fd5b50d280156100"
+        + "27575f80fd5b506004361061004c575f3560e01c80638da5cb5b14610050578063f8a8fd6d1461006e57"
+        + "5b5f80fd5b61005861008c565b6040516100659190610269565b60405180910390f35b6100766100af565b"
+        + "6040516100839190610269565b60405180910390f35b5f8054906101000a900473ffffffffffffffffffff"
+        + "ffffffffffffffffffff1681565b5f60017fbe0166938e2ea2f3f3e0746fdaf46e25c4d8de37ce56d70400"
+        + "cf284c80d47bbe601b7f10afab946e2be82aa3e4280cf24e2cab294911c3beb06ca9dd7ead06081265d07f"
+        + "1e1855bcdc3ed57c6f3c3874cde035782427d1236e2d819bd16c75676ecc003a6040515f81526020016040"
+        + "52604051610133949392919061038f565b6020604051602081039080840390855afa158015610153573d5f"
+        + "803e3d5ffd5b505050602060405103515f806101000a81548173ffffffffffffffffffffffffffffffffff"
+        + "ffffff021916908373ffffffffffffffffffffffffffffffffffffffff160217905550734c95a52686a9b3"
+        + "ff9cf787b94b8549a988334c5773ffffffffffffffffffffffffffffffffffffffff165f8054906101000a"
+        + "900473ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffff"
+        + "ffff1614610205575f80fd5b5f8054906101000a900473ffffffffffffffffffffffffffffffffffffffff"
+        + "16905090565b5f73ffffffffffffffffffffffffffffffffffffffff82169050919050565b5f6102538261"
+        + "022a565b9050919050565b61026381610249565b82525050565b5f60208201905061027c5f83018461025a"
+        + "565b92915050565b5f819050919050565b5f819050919050565b5f815f1b9050919050565b5f6102b96102"
+        + "b46102af84610282565b610294565b61028b565b9050919050565b6102c98161029f565b82525050565b5f"
+        + "819050919050565b5f60ff82169050919050565b5f819050919050565b5f6103076103026102fd846102cf"
+        + "565b6102e4565b6102d8565b9050919050565b610317816102ed565b82525050565b5f819050919050565b"
+        + "5f61034061033b6103368461031d565b610294565b61028b565b9050919050565b61035081610326565b82"
+        + "525050565b5f819050919050565b5f61037961037461036f84610356565b610294565b61028b565b905091"
+        + "9050565b6103898161035f565b82525050565b5f6080820190506103a25f8301876102c0565b6103af6020"
+        + "83018661030e565b6103bc6040830185610347565b6103c96060830184610380565b9594505050505056fe"
+        + "a26474726f6e58221220e967690f9c06386434cbe4d8dd6dce394130f190d17621cbd4ae4cabdef4ad7964"
+        + "736f6c63430008140033";
+    CodeCapsule codeCap = new CodeCapsule(ByteArray.fromHexString(codeString));
+    dbManager.getCodeStore().put(ByteArray.fromHexString(contractAddress), codeCap);
+
+    SmartContractOuterClass.TriggerSmartContract contract =
+        SmartContractOuterClass.TriggerSmartContract.newBuilder()
+            .setOwnerAddress(ByteString.copyFrom(ByteArray.fromHexString(contractAddress)))
+            .setContractAddress(ByteString.copyFrom(ByteArray.fromHexString(contractAddress)))
+            .setData(ByteString.copyFrom(ByteArray.fromHexString("f8a8fd6d")))
+            .build();
+    TransactionCapsule trxCap = wallet.createTransactionCapsule(contract,
+        ContractType.TriggerSmartContract);
+
+    GrpcAPI.TransactionExtention.Builder trxExtBuilder = GrpcAPI.TransactionExtention.newBuilder();
+    GrpcAPI.Return.Builder retBuilder = GrpcAPI.Return.newBuilder();
+
+    Transaction tx = wallet.triggerConstantContract(contract, trxCap, trxExtBuilder, retBuilder);
+    Assert.assertEquals(Transaction.Result.code.SUCESS, tx.getRet(0).getRet());
+
+    VMConfig.initAllowTvmTransferTrc10(0);
+    VMConfig.initAllowTvmConstantinople(0);
+    VMConfig.initAllowTvmShangHai(0);
+    ConfigLoader.disable = false;
+    CommonParameter.getInstance().debug = preDebug;
   }
 
   @Test
@@ -1052,13 +1373,9 @@ public class WalletTest extends BaseTest {
 
     Args.getInstance().setEstimateEnergy(true);
 
-    try {
-      wallet.estimateEnergy(
-          contract, trxCap, trxExtBuilder, retBuilder, estimateBuilder);
-      Assert.fail("EstimateEnergy should throw exception!");
-    } catch (Program.OutOfTimeException ignored) {
-      Assert.assertTrue(true);
-    }
+    Assert.assertThrows(Program.OutOfTimeException.class,
+        () -> wallet.estimateEnergy(
+            contract, trxCap, trxExtBuilder, retBuilder, estimateBuilder));
   }
 
   @Test
@@ -1071,6 +1388,185 @@ public class WalletTest extends BaseTest {
     Args.getInstance().setP2pDisable(true);
     GrpcAPI.NodeList nodeList = wallet.listNodes();
     assertEquals(0, nodeList.getNodesList().size());
+  }
+
+  /**
+   *  We calculate the size of the structure and conclude that
+   *    delegate_balance = 1000_000L; => 277
+   *    delegate_balance = 1000_000_000L; => 279
+   *    delegate_balance = 1000_000_000_000L => 280
+   * <p>
+   *  We initialize account information as follows
+   *    account balance = 1000_000_000_000L
+   *    account frozen_balance = 1000_000_000L
+   * <p>
+   *  then estimateConsumeBandWidthSize cost 279
+   * <p>
+   *  so we have following result:
+   *  TransactionUtil.estimateConsumeBandWidthSize(
+   *    dynamicStore,ownerCapsule.getBalance())   ===> false
+   *  TransactionUtil.estimateConsumeBandWidthSize(
+   *    dynamicStore,ownerCapsule.getFrozenV2BalanceForBandwidth()) ===> true
+   * <p>
+   *  This test case is used to verify the above conclusions
+   */
+  @Test
+  public void testGetCanDelegatedMaxSizeBandWidth123() {
+    long frozenBalance = 1000_000_000L;
+    AccountCapsule ownerCapsule =
+        dbManager.getAccountStore().get(ByteArray.fromHexString(OWNER_ADDRESS));
+    ownerCapsule.addFrozenBalanceForBandwidthV2(frozenBalance);
+    ownerCapsule.setNetUsage(0L);
+    ownerCapsule.setEnergyUsage(0L);
+    dbManager.getDynamicPropertiesStore().saveTotalNetWeight(0L);
+    dbManager.getDynamicPropertiesStore().saveTotalEnergyWeight(0L);
+    dbManager.getDynamicPropertiesStore().addTotalNetWeight(
+        frozenBalance / TRX_PRECISION + 43100000000L);
+    dbManager.getAccountStore().put(ownerCapsule.getAddress().toByteArray(), ownerCapsule);
+
+    GrpcAPI.CanDelegatedMaxSizeResponseMessage message = wallet.getCanDelegatedMaxSize(
+        ByteString.copyFrom(ByteArray.fromHexString(OWNER_ADDRESS)),
+        BANDWIDTH.getNumber());
+    Assert.assertEquals(frozenBalance / TRX_PRECISION - 279,
+        message.getMaxSize() / TRX_PRECISION);
+    chainBaseManager.getDynamicPropertiesStore().saveMaxDelegateLockPeriod(DELEGATE_PERIOD / 3000);
+  }
+
+  @Test
+  public void testGetSolidBlock() {
+    long blkNum = wallet.getSolidBlockNum();
+    Assert.assertEquals(BLOCK_NUM_TWO, blkNum);
+
+    Block block = wallet.getSolidBlock();
+    assertEquals(block2, block);
+  }
+
+  @Test
+  public void testApprovedListSigBound() {
+    ECKey ecKey = new ECKey(Utils.getRandom());
+    AccountCapsule owner = new AccountCapsule(
+        ByteString.copyFromUtf8("approved-owner"),
+        ByteString.copyFrom(ecKey.getAddress()),
+        Protocol.AccountType.Normal,
+        initBalance);
+    chainBaseManager.getAccountStore().put(ecKey.getAddress(), owner);
+    // Default owner permission: a single key with weight 1, so keysCount == 1.
+    int keysCount = owner.getPermissionById(0).getKeysCount();
+    assertEquals(1, keysCount);
+
+    Transaction unsigned = Transaction.newBuilder().setRawData(
+        Transaction.raw.newBuilder().addContract(
+            Contract.newBuilder().setType(ContractType.TransferContract)
+                .setParameter(Any.pack(TransferContract.newBuilder().setAmount(1)
+                    .setOwnerAddress(ByteString.copyFrom(ecKey.getAddress()))
+                    .setToAddress(ByteString.copyFrom(
+                        ByteArray.fromHexString(RECEIVER_ADDRESS)))
+                    .build())).build()).build()).build();
+
+    // One valid 65-byte [r][s][recId] signature by the owner.
+    TransactionCapsule capsule = new TransactionCapsule(unsigned);
+    capsule.sign(ecKey.getPrivKeyBytes());
+    ByteString oneSig = capsule.getInstance().getSignature(0);
+
+    // Within keysCount: the single valid signature is recovered, result is SUCCESS.
+    GrpcAPI.TransactionApprovedList okList = wallet.getTransactionApprovedList(
+        unsigned.toBuilder().addSignature(oneSig).build());
+    assertEquals(GrpcAPI.TransactionApprovedList.Result.response_code.SUCCESS,
+        okList.getResult().getCode());
+    assertEquals(1, okList.getApprovedListCount());
+
+    // More signatures than keysCount: checkWeight rejects before recovering any of them,
+    // so the unbounded ecrecover loop can no longer be triggered.
+    Transaction.Builder overLimit = unsigned.toBuilder();
+    for (int i = 0; i < keysCount + 1; i++) {
+      overLimit.addSignature(oneSig);
+    }
+    GrpcAPI.TransactionApprovedList rejected =
+        wallet.getTransactionApprovedList(overLimit.build());
+    assertEquals(GrpcAPI.TransactionApprovedList.Result.response_code.OTHER_ERROR,
+        rejected.getResult().getCode());
+    assertEquals(0, rejected.getApprovedListCount());
+    Assert.assertFalse(rejected.getResult().getMessage().isEmpty());
+  }
+
+  @Test
+  public void testApprovedListSigTruncate() {
+    ECKey ecKey = new ECKey(Utils.getRandom());
+    AccountCapsule owner = new AccountCapsule(
+        ByteString.copyFromUtf8("approved-owner-trunc"),
+        ByteString.copyFrom(ecKey.getAddress()),
+        Protocol.AccountType.Normal,
+        initBalance);
+    chainBaseManager.getAccountStore().put(ecKey.getAddress(), owner);
+
+    Transaction unsigned = Transaction.newBuilder().setRawData(
+        Transaction.raw.newBuilder().addContract(
+            Contract.newBuilder().setType(ContractType.TransferContract)
+                .setParameter(Any.pack(TransferContract.newBuilder().setAmount(1)
+                    .setOwnerAddress(ByteString.copyFrom(ecKey.getAddress()))
+                    .setToAddress(ByteString.copyFrom(
+                        ByteArray.fromHexString(RECEIVER_ADDRESS)))
+                    .build())).build()).build()).build();
+
+    TransactionCapsule capsule = new TransactionCapsule(unsigned);
+    capsule.sign(ecKey.getPrivKeyBytes());
+    ByteString validSig = capsule.getInstance().getSignature(0);
+    assertEquals(65, validSig.size());
+
+    // Pad the 65-byte signature with trailing junk bytes.
+    ByteString oversized = validSig.concat(
+        ByteString.copyFrom(new byte[] {1, 2, 3, 4, 5}));
+    assertEquals(70, oversized.size());
+
+    GrpcAPI.TransactionApprovedList reply = wallet.getTransactionApprovedList(
+        unsigned.toBuilder().addSignature(oversized).build());
+
+    // Recovery still succeeds and resolves the owner.
+    assertEquals(GrpcAPI.TransactionApprovedList.Result.response_code.SUCCESS,
+        reply.getResult().getCode());
+    assertEquals(1, reply.getApprovedListCount());
+    // The echoed-back transaction has the signature truncated to 65 bytes.
+    Transaction echoed = reply.getTransaction().getTransaction();
+    assertEquals(1, echoed.getSignatureCount());
+    assertEquals(65, echoed.getSignature(0).size());
+    assertEquals(validSig, echoed.getSignature(0));
+  }
+
+  @Test
+  public void testApprovedListTooManySigs() {
+    ECKey ecKey = new ECKey(Utils.getRandom());
+    AccountCapsule owner = new AccountCapsule(
+        ByteString.copyFromUtf8("total-sign-num-owner"),
+        ByteString.copyFrom(ecKey.getAddress()),
+        Protocol.AccountType.Normal,
+        initBalance);
+    chainBaseManager.getAccountStore().put(ecKey.getAddress(), owner);
+
+    Transaction unsigned = Transaction.newBuilder().setRawData(
+        Transaction.raw.newBuilder().addContract(
+            Contract.newBuilder().setType(ContractType.TransferContract)
+                .setParameter(Any.pack(TransferContract.newBuilder().setAmount(1)
+                    .setOwnerAddress(ByteString.copyFrom(ecKey.getAddress()))
+                    .setToAddress(ByteString.copyFrom(
+                        ByteArray.fromHexString(RECEIVER_ADDRESS)))
+                    .build())).build()).build()).build();
+
+    TransactionCapsule capsule = new TransactionCapsule(unsigned);
+    capsule.sign(ecKey.getPrivKeyBytes());
+    ByteString oneSig = capsule.getInstance().getSignature(0);
+
+    int totalSignNum = chainBaseManager.getDynamicPropertiesStore().getTotalSignNum();
+    Transaction.Builder overLimit = unsigned.toBuilder();
+    for (int i = 0; i < totalSignNum + 1; i++) {
+      overLimit.addSignature(oneSig);
+    }
+
+    GrpcAPI.TransactionApprovedList rejected =
+        wallet.getTransactionApprovedList(overLimit.build());
+    assertEquals(GrpcAPI.TransactionApprovedList.Result.response_code.OTHER_ERROR,
+        rejected.getResult().getCode());
+    Assert.assertTrue(rejected.getResult().getMessage().contains("too many signatures"));
+    assertEquals(0, rejected.getApprovedListCount());
   }
 }
 

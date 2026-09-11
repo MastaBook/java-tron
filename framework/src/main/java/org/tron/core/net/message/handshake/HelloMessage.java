@@ -4,6 +4,8 @@ import com.google.protobuf.ByteString;
 import lombok.Getter;
 import org.apache.commons.lang3.StringUtils;
 import org.tron.common.utils.ByteArray;
+import org.tron.common.utils.DecodeUtil;
+import org.tron.common.utils.Sha256Hash;
 import org.tron.common.utils.StringUtil;
 import org.tron.core.ChainBaseManager;
 import org.tron.core.capsule.BlockCapsule;
@@ -11,6 +13,7 @@ import org.tron.core.config.args.Args;
 import org.tron.core.net.message.MessageTypes;
 import org.tron.core.net.message.TronMessage;
 import org.tron.p2p.discover.Node;
+import org.tron.program.Version;
 import org.tron.protos.Discover.Endpoint;
 import org.tron.protos.Protocol;
 import org.tron.protos.Protocol.HelloMessage.Builder;
@@ -61,6 +64,7 @@ public class HelloMessage extends TronMessage {
     builder.setNodeType(chainBaseManager.getNodeType().getType());
     builder.setLowestBlockNum(chainBaseManager.isLiteNode()
         ? chainBaseManager.getLowestBlockNum() : 0);
+    builder.setCodeVersion(ByteString.copyFrom(Version.getVersion().getBytes()));
 
     this.helloMessage = builder.build();
     this.type = MessageTypes.P2P_HELLO.asByte();
@@ -127,15 +131,21 @@ public class HelloMessage extends TronMessage {
             .append("lowestBlockNum: ").append(helloMessage.getLowestBlockNum()).append("\n");
 
     ByteString address = helloMessage.getAddress();
-    if (address != null && !address.isEmpty()) {
+    if (!address.isEmpty()) {
       builder.append("address:")
               .append(StringUtil.encode58Check(address.toByteArray())).append("\n");
     }
 
     ByteString signature = helloMessage.getSignature();
-    if (signature != null && !signature.isEmpty()) {
+    if (!signature.isEmpty()) {
       builder.append("signature:")
               .append(signature.toByteArray().length).append("\n");
+    }
+
+    ByteString codeVersion = helloMessage.getCodeVersion();
+    if (!codeVersion.isEmpty()) {
+      builder.append("codeVersion:")
+          .append(new String(codeVersion.toByteArray())).append("\n");
     }
 
     return builder.toString();
@@ -147,17 +157,33 @@ public class HelloMessage extends TronMessage {
 
   public boolean valid() {
     byte[] genesisBlockByte = this.helloMessage.getGenesisBlockId().getHash().toByteArray();
-    if (genesisBlockByte.length == 0) {
+    if (genesisBlockByte.length != Sha256Hash.LENGTH) {
       return false;
     }
 
     byte[] solidBlockId = this.helloMessage.getSolidBlockId().getHash().toByteArray();
-    if (solidBlockId.length == 0) {
+    if (solidBlockId.length != Sha256Hash.LENGTH) {
       return false;
     }
 
     byte[] headBlockId = this.helloMessage.getHeadBlockId().getHash().toByteArray();
-    if (headBlockId.length == 0) {
+    if (headBlockId.length != Sha256Hash.LENGTH) {
+      return false;
+    }
+
+    int maxByteSize = 200;
+    ByteString address = this.helloMessage.getAddress();
+    if (!address.isEmpty() && address.toByteArray().length > maxByteSize) {
+      return false;
+    }
+
+    ByteString sig = this.helloMessage.getSignature();
+    if (!sig.isEmpty() && sig.toByteArray().length > maxByteSize) {
+      return false;
+    }
+
+    ByteString codeVersion = this.helloMessage.getCodeVersion();
+    if (!codeVersion.isEmpty() && codeVersion.toByteArray().length > maxByteSize) {
       return false;
     }
 

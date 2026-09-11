@@ -8,14 +8,13 @@ import java.util.List;
 import javax.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.junit.Assert;
-import org.junit.BeforeClass;
 import org.junit.Test;
 import org.tron.common.BaseTest;
+import org.tron.common.TestConstants;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.common.utils.ByteArray;
 import org.tron.common.utils.Pair;
 import org.tron.common.utils.Sha256Hash;
-import org.tron.core.Constant;
 import org.tron.core.capsule.BlockCapsule;
 import org.tron.core.config.args.Args;
 import org.tron.core.exception.BadNumberBlockException;
@@ -32,14 +31,9 @@ public class KhaosDatabaseTest extends BaseTest {
   private KhaosDatabase khaosDatabase;
 
   static {
-    dbPath = "output-khaosDatabase-test";
-    Args.setParam(new String[]{"--output-directory", dbPath}, Constant.TEST_CONF);
+    Args.setParam(new String[]{"--output-directory", dbPath()}, TestConstants.TEST_CONF);
   }
 
-  @BeforeClass
-  public static void init() {
-    Args.setParam(new String[]{"-d", dbPath}, Constant.TEST_CONF);
-  }
 
   @Test
   public void testStartBlock() {

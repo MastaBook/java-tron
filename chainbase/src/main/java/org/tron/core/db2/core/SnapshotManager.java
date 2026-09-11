@@ -16,23 +16,19 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.locks.LockSupport;
 import java.util.stream.Collectors;
 import javax.annotation.PostConstruct;
-import javax.annotation.PreDestroy;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.tron.common.error.TronDBException;
+import org.tron.common.es.ExecutorServiceManager;
 import org.tron.common.parameter.CommonParameter;
-import org.tron.common.storage.WriteOptionsWrapper;
 import org.tron.common.utils.FileUtil;
 import org.tron.common.utils.StorageUtils;
 import org.tron.core.db.RevokingDatabase;
@@ -44,6 +40,7 @@ import org.tron.core.db2.common.Key;
 import org.tron.core.db2.common.Value;
 import org.tron.core.db2.common.WrappedByteArray;
 import org.tron.core.exception.RevokingStoreIllegalStateException;
+import org.tron.core.exception.TronError;
 import org.tron.core.store.CheckPointV2Store;
 import org.tron.core.store.CheckTmpStore;
 
@@ -70,12 +67,12 @@ public class SnapshotManager implements RevokingDatabase {
 
   private volatile int flushCount = 0;
 
-  private Thread exitThread;
   private volatile boolean  hitDown;
 
   private Map<String, ListeningExecutorService> flushServices = new HashMap<>();
 
   private ScheduledExecutorService pruneCheckpointThread = null;
+  private final String pruneName = "checkpoint-prune";
 
   @Autowired
   @Setter
@@ -95,7 +92,7 @@ public class SnapshotManager implements RevokingDatabase {
     checkpointVersion = CommonParameter.getInstance().getStorage().getCheckpointVersion();
     // prune checkpoint
     if (isV2Open()) {
-      pruneCheckpointThread = Executors.newSingleThreadScheduledExecutor();
+      pruneCheckpointThread = ExecutorServiceManager.newSingleThreadScheduledExecutor(pruneName);
       pruneCheckpointThread.scheduleWithFixedDelay(() -> {
         try {
           if (!unChecked) {
@@ -105,27 +102,6 @@ public class SnapshotManager implements RevokingDatabase {
           logger.error("Exception in prune checkpoint", t);
         }
       }, 10000, 3600, TimeUnit.MILLISECONDS);
-    }
-    exitThread =  new Thread(() -> {
-      LockSupport.park();
-      // to Guarantee Some other thread invokes unpark with the current thread as the target
-      if (hitDown) {
-        System.exit(1);
-      }
-    });
-    exitThread.setName("exit-thread");
-    exitThread.start();
-  }
-
-  @PreDestroy
-  public void close() {
-    try {
-      exitThread.interrupt();
-      // help GC
-      exitThread = null;
-      flushServices.values().forEach(ExecutorService::shutdown);
-    } catch (Exception e) {
-      logger.warn("exitThread interrupt error", e);
     }
   }
 
@@ -177,7 +153,8 @@ public class SnapshotManager implements RevokingDatabase {
     Chainbase revokingDB = (Chainbase) db;
     dbs.add(revokingDB);
     flushServices.put(revokingDB.getDbName(),
-        MoreExecutors.listeningDecorator(Executors.newSingleThreadExecutor()));
+        MoreExecutors.listeningDecorator(ExecutorServiceManager.newSingleThreadExecutor(
+            "flush-service-" + revokingDB.getDbName())));
   }
 
   private void advance() {
@@ -233,6 +210,12 @@ public class SnapshotManager implements RevokingDatabase {
     }
 
     --activeSession;
+
+    dbs.forEach(db -> {
+      if (db.getHead().isOptimized()) {
+        db.getHead().reloadToMem();
+      }
+    });
   }
 
   public synchronized void pop() {
@@ -284,13 +267,9 @@ public class SnapshotManager implements RevokingDatabase {
 
   @Override
   public void shutdown() {
-    logger.info("******** Begin to pop revokingDb. ********");
-    logger.info("******** Before revokingDb size: {}.", size);
-    checkTmpStore.close();
-    logger.info("******** End to pop revokingDb. ********");
-    if (pruneCheckpointThread != null) {
-      pruneCheckpointThread.shutdown();
-    }
+    ExecutorServiceManager.shutdownAndAwaitTermination(pruneCheckpointThread, pruneName);
+    flushServices.forEach((key, value) -> ExecutorServiceManager.shutdownAndAwaitTermination(value,
+        "flush-service-" + key));
   }
 
   public void updateSolidity(int hops) {
@@ -301,7 +280,7 @@ public class SnapshotManager implements RevokingDatabase {
     }
   }
 
-  private boolean shouldBeRefreshed() {
+  public boolean shouldBeRefreshed() {
     return flushCount >= maxFlushCount;
   }
 
@@ -370,14 +349,13 @@ public class SnapshotManager implements RevokingDatabase {
       } catch (TronDBException e) {
         logger.error(" Find fatal error, program will be exited soon.", e);
         hitDown = true;
-        LockSupport.unpark(exitThread);
+        throw new TronError(e, TronError.ErrCode.DB_FLUSH);
       }
     }
   }
 
-  private void createCheckpoint() {
+  public void createCheckpoint() {
     TronDatabase<byte[]> checkPointStore = null;
-    boolean syncFlag;
     try {
       Map<WrappedByteArray, WrappedByteArray> batch = new HashMap<>();
       for (Chainbase db : dbs) {
@@ -409,16 +387,13 @@ public class SnapshotManager implements RevokingDatabase {
       if (isV2Open()) {
         String dbName = String.valueOf(System.currentTimeMillis());
         checkPointStore = getCheckpointDB(dbName);
-        syncFlag = CommonParameter.getInstance().getStorage().isCheckpointSync();
       } else {
         checkPointStore = checkTmpStore;
-        syncFlag = CommonParameter.getInstance().getStorage().isDbSync();
       }
 
-      checkPointStore.getDbSource().updateByBatch(batch.entrySet().stream()
+      checkPointStore.updateByBatch(batch.entrySet().stream()
               .map(e -> Maps.immutableEntry(e.getKey().getBytes(), e.getValue().getBytes()))
-              .collect(HashMap::new, (m, k) -> m.put(k.getKey(), k.getValue()), HashMap::putAll),
-          WriteOptionsWrapper.getInstance().sync(syncFlag));
+              .collect(HashMap::new, (m, k) -> m.put(k.getKey(), k.getValue()), HashMap::putAll));
 
     } catch (Exception e) {
       throw new TronDBException(e);
@@ -433,7 +408,7 @@ public class SnapshotManager implements RevokingDatabase {
     return new CheckPointV2Store(CHECKPOINT_V2_DIR+"/"+dbName);
   }
 
-  private List<String> getCheckpointList() {
+  public List<String> getCheckpointList() {
     String dbPath = Paths.get(StorageUtils.getOutputDirectoryByDbName(CHECKPOINT_V2_DIR),
         CommonParameter.getInstance().getStorage().getDbDirectory()).toString();
     File file = new File(Paths.get(dbPath, CHECKPOINT_V2_DIR).toString());
@@ -447,6 +422,10 @@ public class SnapshotManager implements RevokingDatabase {
   }
 
   private void deleteCheckpoint() {
+    if(checkTmpStore == null) {
+      // only occurs in mock test. TODO fix test
+      return;
+    }
     try {
       Map<byte[], byte[]> hmap = new HashMap<>();
       for (Map.Entry<byte[], byte[]> e : checkTmpStore.getDbSource()) {
@@ -493,8 +472,10 @@ public class SnapshotManager implements RevokingDatabase {
     if (!isV2Open()) {
       List<String> cpList = getCheckpointList();
       if (cpList != null && cpList.size() != 0) {
-        logger.error("checkpoint check failed, can't convert checkpoint from v2 to v1");
-        System.exit(-1);
+        String msg = "checkpoint check failed, the checkpoint version of database not match your "
+            + "config file, please set storage.checkpoint.version = 2 in your config file "
+            + "and restart the node.";
+        throw new TronError(msg, TronError.ErrCode.CHECKPOINT_VERSION);
       }
       checkV1();
     } else {

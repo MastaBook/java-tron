@@ -22,13 +22,15 @@ import com.google.protobuf.InvalidProtocolBufferException;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import lombok.extern.slf4j.Slf4j;
-import org.tron.common.utils.Commons;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.common.utils.DecodeUtil;
 import org.tron.core.capsule.AccountCapsule;
 import org.tron.core.capsule.AssetIssueCapsule;
 import org.tron.core.capsule.TransactionResultCapsule;
+import org.tron.core.config.Parameter.ForkBlockVersionEnum;
 import org.tron.core.exception.BalanceInsufficientException;
 import org.tron.core.exception.ContractExeException;
 import org.tron.core.exception.ContractValidateException;
@@ -84,11 +86,11 @@ public class AssetIssueActuator extends AbstractActuator {
             .put(assetIssueCapsuleV2.createDbV2Key(), assetIssueCapsuleV2);
       }
 
-      Commons.adjustBalance(accountStore, ownerAddress, -fee);
+      adjustBalance(accountStore, ownerAddress, -fee);
       if (dynamicStore.supportBlackHoleOptimization()) {
         dynamicStore.burnTrx(fee);
       } else {
-        Commons.adjustBalance(accountStore, accountStore.getBlackhole(), fee);//send to blackhole
+        adjustBalance(accountStore, accountStore.getBlackhole(), fee);//send to blackhole
       }
       AccountCapsule accountCapsule = accountStore.get(ownerAddress);
       List<FrozenSupply> frozenSupplyList = assetIssueContract.getFrozenSupplyList();
@@ -165,7 +167,7 @@ public class AssetIssueActuator extends AbstractActuator {
     }
 
     if (dynamicStore.getAllowSameTokenName() != 0) {
-      String name = assetIssueContract.getName().toStringUtf8().toLowerCase();
+      String name = assetIssueContract.getName().toStringUtf8().toLowerCase(Locale.ROOT);
       if (("trx").equals(name)) {
         throw new ContractValidateException("assetName can't be trx");
       }
@@ -263,6 +265,16 @@ public class AssetIssueActuator extends AbstractActuator {
         throw new ContractValidateException(
             "frozenDuration must be less than " + maxFrozenSupplyTime + " days "
                 + "and more than " + minFrozenSupplyTime + " days");
+      }
+      // make sure FrozenSupply.expireTime not overflow
+      if (chainBaseManager.getForkController().pass(ForkBlockVersionEnum.VERSION_4_8_1)) {
+        long frozenPeriod = next.getFrozenDays() * FROZEN_PERIOD;
+        try {
+          StrictMathWrapper.addExact(assetIssueContract.getStartTime(), frozenPeriod);
+        } catch (ArithmeticException e) {
+          throw new ContractValidateException(
+              "Start time and frozen days would cause expire time overflow");
+        }
       }
       remainSupply -= next.getFrozenAmount();
     }

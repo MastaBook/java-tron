@@ -6,6 +6,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.tron.common.utils.ByteArray;
 import org.tron.core.ChainBaseManager;
+import org.tron.core.ChainBaseManager.NodeType;
 import org.tron.core.config.args.Args;
 import org.tron.core.net.TronNetService;
 import org.tron.core.net.message.handshake.HelloMessage;
@@ -48,13 +49,16 @@ public class HandshakeService {
     }
 
     if (!msg.valid()) {
-      logger.warn("Peer {} invalid hello message parameters, "
-                      + "GenesisBlockId: {}, SolidBlockId: {}, HeadBlockId: {}",
-              peer.getInetSocketAddress(),
-              ByteArray.toHexString(msg.getInstance().getGenesisBlockId().getHash().toByteArray()),
-              ByteArray.toHexString(msg.getInstance().getSolidBlockId().getHash().toByteArray()),
-              ByteArray.toHexString(msg.getInstance().getHeadBlockId().getHash().toByteArray()));
-      peer.disconnect(ReasonCode.UNEXPECTED_IDENTITY);
+      logger.warn("Peer {} invalid hello message parameters, GenesisBlockId: {}, SolidBlockId: {}, "
+              + "HeadBlockId: {}, address: {}, sig: {}, codeVersion: {}",
+          peer.getInetSocketAddress(),
+          ByteArray.toHexString(msg.getInstance().getGenesisBlockId().getHash().toByteArray()),
+          ByteArray.toHexString(msg.getInstance().getSolidBlockId().getHash().toByteArray()),
+          ByteArray.toHexString(msg.getInstance().getHeadBlockId().getHash().toByteArray()),
+          msg.getInstance().getAddress().toByteArray().length,
+          msg.getInstance().getSignature().toByteArray().length,
+          msg.getInstance().getCodeVersion().toByteArray().length);
+      peer.disconnect(ReasonCode.INCOMPATIBLE_PROTOCOL);
       return;
     }
 
@@ -93,12 +97,17 @@ public class HandshakeService {
     }
 
     if (chainBaseManager.getSolidBlockId().getNum() >= msg.getSolidBlockId().getNum()
-            && !chainBaseManager.containBlockInMainChain(msg.getSolidBlockId())) {
-      logger.info("Peer {} different solid block, peer->{}, me->{}",
-              peer.getInetSocketAddress(),
-              msg.getSolidBlockId().getString(),
-              chainBaseManager.getSolidBlockId().getString());
-      peer.disconnect(ReasonCode.FORKED);
+        && !chainBaseManager.containBlockInMainChain(msg.getSolidBlockId())) {
+      if (chainBaseManager.getLowestBlockNum() <= msg.getSolidBlockId().getNum()) {
+        logger.info("Peer {} different solid block, fork with me, peer->{}, me->{}",
+            peer.getInetSocketAddress(),
+            msg.getSolidBlockId().getString(),
+            chainBaseManager.getSolidBlockId().getString());
+        peer.disconnect(ReasonCode.FORKED);
+      } else {
+        logger.info("Peer {} solid block is below than my lowest", peer.getInetSocketAddress());
+        peer.disconnect(ReasonCode.LIGHT_NODE_SYNC_FAIL);
+      }
       return;
     }
 

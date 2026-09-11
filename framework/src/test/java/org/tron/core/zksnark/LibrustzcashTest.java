@@ -4,6 +4,8 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertTrue;
+import static org.tron.common.math.Maths.random;
+import static org.tron.common.math.Maths.round;
 import static org.tron.common.zksnark.JLibrustzcash.librustzcashCheckDiversifier;
 import static org.tron.common.zksnark.JLibrustzcash.librustzcashComputeCm;
 import static org.tron.common.zksnark.JLibrustzcash.librustzcashIvkToPkd;
@@ -27,6 +29,7 @@ import org.junit.BeforeClass;
 import org.junit.Ignore;
 import org.junit.Test;
 import org.tron.common.BaseTest;
+import org.tron.common.TestConstants;
 import org.tron.common.utils.ByteArray;
 import org.tron.common.utils.ByteUtil;
 import org.tron.common.zksnark.IncrementalMerkleTreeContainer;
@@ -50,9 +53,9 @@ import org.tron.core.capsule.SpendDescriptionCapsule;
 import org.tron.core.config.args.Args;
 import org.tron.core.exception.BadItemException;
 import org.tron.core.exception.ZksnarkException;
-import org.tron.core.services.http.FullNodeHttpApiService;
 import org.tron.core.zen.ZenTransactionBuilder;
 import org.tron.core.zen.ZenTransactionBuilder.SpendDescriptionInfo;
+import org.tron.core.zen.ZksnarkInitService;
 import org.tron.core.zen.address.DiversifierT;
 import org.tron.core.zen.address.ExpandedSpendingKey;
 import org.tron.core.zen.address.FullViewingKey;
@@ -67,28 +70,25 @@ import org.tron.protos.contract.ShieldContract.PedersenHash;
 @Slf4j
 public class LibrustzcashTest extends BaseTest {
   private static final String dbDirectory = "db_Librustzcash_test";
-  private static final String indexDirectory = "index_Librustzcash_test";
   @Resource
   private Wallet wallet;
 
   @BeforeClass
   public static void init() {
-    dbPath = "output_Librustzcash_test";
     Args.setParam(
         new String[]{
-            "--output-directory", dbPath,
+            "--output-directory", dbPath(),
             "--storage-db-directory", dbDirectory,
-            "--storage-index-directory", indexDirectory,
-            "-w",
             "--debug"
         },
-        "config-test-mainnet.conf"
+        TestConstants.TEST_CONF
     );
-    Args.setFullNodeAllowShieldedTransaction(true);
+    Args.getInstance().setAllowShieldedTransactionApi(true);
+    ZksnarkInitService.librustzcashInitZksnarkParams();
   }
 
   private static int randomInt(int minInt, int maxInt) {
-    return (int) Math.round(Math.random() * (maxInt - minInt) + minInt);
+    return (int) round(random(true) * (maxInt - minInt) + minInt, true);
   }
 
   public static void test(byte[] K, byte[] ovk, byte[] cv, byte[] cm, byte[] epk)
@@ -113,10 +113,6 @@ public class LibrustzcashTest extends BaseTest {
         .cryptoAeadChacha20poly1305IetfDecrypt(new Chacha20poly1305IetfDecryptParams(
             new byte[1024], null, null, new byte[1024], 1024,
             null, 0, cipher_nonce, K)));
-  }
-
-  public static void librustzcashInitZksnarkParams() {
-    FullNodeHttpApiService.librustzcashInitZksnarkParams();
   }
 
   @Test
@@ -275,7 +271,6 @@ public class LibrustzcashTest extends BaseTest {
   @Ignore
   @Test
   public void calBenchmarkSpendConcurrent() throws Exception {
-    librustzcashInitZksnarkParams();
     System.out.println("--- load ok ---");
 
     int count = 2;
@@ -301,13 +296,13 @@ public class LibrustzcashTest extends BaseTest {
     }));
 
     countDownLatch.await();
+    generatePool.shutdown();
 
     logger.info("generate cost time:" + (System.currentTimeMillis() - startGenerate));
   }
 
   @Test
   public void calBenchmarkSpend() throws ZksnarkException {
-    librustzcashInitZksnarkParams();
     System.out.println("--- load ok ---");
 
     int count = 2;
@@ -374,7 +369,6 @@ public class LibrustzcashTest extends BaseTest {
 
   @Test
   public void calBenchmarkCreateSaplingSpend() throws BadItemException, ZksnarkException {
-    librustzcashInitZksnarkParams();
     System.out.println("--- load ok ---");
 
     int count = 2;
@@ -451,7 +445,6 @@ public class LibrustzcashTest extends BaseTest {
 
   @Test
   public void calBenchmarkCreateSaplingOutPut() throws BadItemException, ZksnarkException {
-    librustzcashInitZksnarkParams();
     System.out.println("--- load ok ---");
 
     int count = 2;
@@ -479,7 +472,6 @@ public class LibrustzcashTest extends BaseTest {
 
   @Test
   public void checkVerifyOutErr() throws ZksnarkException {
-    librustzcashInitZksnarkParams();
     System.out.println("--- load ok ---");
 
     // expect fail

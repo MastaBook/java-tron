@@ -1,6 +1,9 @@
 package org.tron.common.utils.client.utils;
 
+import static org.tron.common.math.Maths.abs;
+
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
@@ -17,6 +20,7 @@ public class AbiUtil {
   private static Pattern paramTypeBytes = Pattern.compile("^bytes([0-9]*)$");
   private static Pattern paramTypeNumber = Pattern.compile("^(u?int)([0-9]*)$");
   private static Pattern paramTypeArray = Pattern.compile("^(.*)\\[([0-9]*)]$");
+  private static final ObjectMapper mapper = new ObjectMapper();
 
   public static String[] getTypes(String methodSign) {
     int start = methodSign.indexOf('(') + 1;
@@ -219,7 +223,6 @@ public class AbiUtil {
   }
 
   public static byte[] encodeInput(String methodSign, String input) {
-    ObjectMapper mapper = new ObjectMapper();
     input = "[" + input + "]";
     List items;
     try {
@@ -236,6 +239,16 @@ public class AbiUtil {
     }
 
     return pack(coders, items);
+  }
+
+  public static String generateOccupationConstantPrivateKey() {
+    StringBuilder privateKey = new StringBuilder();
+    String baseKey = "1234567890";
+    for (int i = 0; i < 6; i++) {
+      privateKey.append(baseKey);
+    }
+    privateKey.append("1234");
+    return privateKey.toString();
   }
 
   public static void main(String[] args) {
@@ -303,7 +316,6 @@ public class AbiUtil {
 
       List items;
       try {
-        ObjectMapper mapper = new ObjectMapper();
         items = mapper.readValue(arrayValues, List.class);
       } catch (IOException e) {
         e.printStackTrace();
@@ -340,7 +352,7 @@ public class AbiUtil {
     @Override
     byte[] encode(String value) {
       long n = Long.valueOf(value);
-      DataWord word = new DataWord(Math.abs(n));
+      DataWord word = new DataWord(abs(n, true));
       if (n < 0) {
         word.negate();
       }

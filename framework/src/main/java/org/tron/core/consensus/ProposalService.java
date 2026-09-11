@@ -4,6 +4,7 @@ import java.util.Map;
 import lombok.extern.slf4j.Slf4j;
 import org.tron.core.capsule.ProposalCapsule;
 import org.tron.core.config.Parameter.ForkBlockVersionEnum;
+import org.tron.core.db.HistoryBlockHashUtil;
 import org.tron.core.db.Manager;
 import org.tron.core.store.DynamicPropertiesStore;
 import org.tron.core.utils.ProposalUtil;
@@ -353,6 +354,62 @@ public class ProposalService extends ProposalUtil {
         }
         case MAX_DELEGATE_LOCK_PERIOD: {
           manager.getDynamicPropertiesStore().saveMaxDelegateLockPeriod(entry.getValue());
+          break;
+        }
+        case ALLOW_OLD_REWARD_OPT: {
+          manager.getDynamicPropertiesStore().saveAllowOldRewardOpt(entry.getValue());
+          break;
+        }
+        case ALLOW_ENERGY_ADJUSTMENT: {
+          manager.getDynamicPropertiesStore().saveAllowEnergyAdjustment(entry.getValue());
+          break;
+        }
+        case MAX_CREATE_ACCOUNT_TX_SIZE: {
+          manager.getDynamicPropertiesStore().saveMaxCreateAccountTxSize(entry.getValue());
+          break;
+        }
+        case ALLOW_STRICT_MATH: {
+          manager.getDynamicPropertiesStore().saveAllowStrictMath(entry.getValue());
+          break;
+        }
+        case CONSENSUS_LOGIC_OPTIMIZATION: {
+          manager.getDynamicPropertiesStore()
+            .saveConsensusLogicOptimization(entry.getValue());
+          break;
+        }
+        case ALLOW_TVM_CANCUN: {
+          manager.getDynamicPropertiesStore().saveAllowTvmCancun(entry.getValue());
+          break;
+        }
+        case ALLOW_TVM_BLOB: {
+          manager.getDynamicPropertiesStore().saveAllowTvmBlob(entry.getValue());
+          break;
+        }
+        case ALLOW_TVM_SELFDESTRUCT_RESTRICTION: {
+          manager.getDynamicPropertiesStore().saveAllowTvmSelfdestructRestriction(entry.getValue());
+          break;
+        }
+        case PROPOSAL_EXPIRE_TIME: {
+          manager.getDynamicPropertiesStore().saveProposalExpireTime(entry.getValue());
+          break;
+        }
+        case ALLOW_TVM_OSAKA: {
+          manager.getDynamicPropertiesStore().saveAllowTvmOsaka(entry.getValue());
+          break;
+        }
+        case ALLOW_TVM_PRAGUE: {
+          manager.getDynamicPropertiesStore().saveAllowTvmPrague(entry.getValue());
+          HistoryBlockHashUtil.deploy(manager);
+          break;
+        }
+        case ALLOW_HARDEN_RESOURCE_CALCULATION: {
+          manager.getDynamicPropertiesStore()
+              .saveAllowHardenResourceCalculation(entry.getValue());
+          break;
+        }
+        case ALLOW_HARDEN_EXCHANGE_CALCULATION: {
+          manager.getDynamicPropertiesStore()
+              .saveAllowHardenExchangeCalculation(entry.getValue());
           break;
         }
         default:

@@ -1,7 +1,5 @@
 package org.tron.common.utils.client.utils;
 
-import com.alibaba.fastjson.JSONArray;
-import com.alibaba.fastjson.JSONObject;
 import com.google.common.collect.Lists;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
@@ -23,11 +21,14 @@ import org.apache.http.impl.conn.PoolingClientConnectionManager;
 import org.apache.http.params.CoreConnectionPNames;
 import org.apache.http.util.EntityUtils;
 import org.junit.Assert;
+import org.springframework.mock.web.MockHttpServletRequest;
 import org.tron.api.GrpcAPI;
 import org.tron.common.utils.ByteArray;
 import org.tron.common.utils.ByteUtil;
 import org.tron.common.utils.PublicMethod;
 import org.tron.common.utils.client.Configuration;
+import org.tron.json.JSONArray;
+import org.tron.json.JSONObject;
 
 @Slf4j
 public class HttpMethed {
@@ -35,10 +36,8 @@ public class HttpMethed {
   static HttpClient httpClient;
   static HttpPost httppost;
   static HttpResponse response;
-  static Integer connectionTimeout =
-      Configuration.getByPath("testng.conf").getInt("defaultParameter.httpConnectionTimeout");
-  static Integer soTimeout =
-      Configuration.getByPath("testng.conf").getInt("defaultParameter.httpSoTimeout");
+  static Integer connectionTimeout = 19000;
+  static Integer soTimeout = 18000;
   static String transactionString;
   static String transactionSignString;
   static JSONObject responseContent;
@@ -47,8 +46,7 @@ public class HttpMethed {
   public static volatile Integer witnessNum;
 
   /** constructor. */
-  private static volatile String httpnode =
-      Configuration.getByPath("testng.conf").getStringList("httpnode.ip.list").get(1);
+  private static volatile String httpnode = "127.0.0.1:50052";
 
   /** constructor. */
   public static Integer getWitnessNum() {
@@ -1170,7 +1168,7 @@ public class HttpMethed {
       String httpNode, String transactionString, String privateKey) {
     try {
       transactionSignString = TransactionUtils.getTransactionSign(transactionString, privateKey,
-              false);
+          false);
     } catch (Exception e) {
       e.printStackTrace();
       httppost.releaseConnection();
@@ -2233,7 +2231,7 @@ public class HttpMethed {
     }
     Integer nextBlockNum = 0;
     Integer times = 0;
-    while (nextBlockNum <= currentBlockNum + 1 && times++ <= 10) {
+    while (nextBlockNum < currentBlockNum + 1 && times++ <= 6) {
       response = HttpMethed.getNowBlock(httpNode);
       responseContent = HttpMethed.parseResponseContent(response);
       if (responseContent.containsKey("block_header")) {
@@ -3445,7 +3443,7 @@ public class HttpMethed {
       String jsonString = responseContent.toJSONString();
       if (jsonString.contains("result")
           && (responseContent.getString("result").equals("true")
-              && responseContent.getString("message").equals("Input note has been spent"))) {
+          && responseContent.getString("message").equals("Input note has been spent"))) {
         return Boolean.TRUE;
       } else {
         return Boolean.FALSE;
@@ -3500,7 +3498,7 @@ public class HttpMethed {
       String jsonString = responseContent.toJSONString();
       if (jsonString.contains("result")
           && (responseContent.getString("result").equals("true")
-              && responseContent.getString("message").equals("Input note has been spent"))) {
+          && responseContent.getString("message").equals("Input note has been spent"))) {
         return Boolean.TRUE;
       } else {
         return Boolean.FALSE;
@@ -3551,7 +3549,7 @@ public class HttpMethed {
       String jsonString = responseContent.toJSONString();
       if (jsonString.contains("result")
           && (responseContent.getString("result").equals("true")
-              && responseContent.getString("message").equals("Input note has been spent"))) {
+          && responseContent.getString("message").equals("Input note has been spent"))) {
         return Boolean.TRUE;
       } else {
         return Boolean.FALSE;
@@ -4233,10 +4231,8 @@ public class HttpMethed {
   public static void freedResource(
       String httpNode, byte[] fromAddress, byte[] toAddress, String fromKey) {
     long balance = HttpMethed.getBalance(httpNode, fromAddress);
-    // System.out.println("剩余资源：" + balance);
     sendCoin(httpNode, fromAddress, toAddress, balance - 50000, fromKey);
     balance = HttpMethed.getBalance(httpNode, fromAddress);
-    // System.out.println("之后资源：" + balance);
   }
 
   /** constructor. */
@@ -4875,5 +4871,12 @@ public class HttpMethed {
       return null;
     }
     return response;
+  }
+
+  public static MockHttpServletRequest createRequest(String method) {
+    MockHttpServletRequest request = new MockHttpServletRequest();
+    request.setMethod(method);
+    request.setCharacterEncoding("UTF-8");
+    return request;
   }
 }

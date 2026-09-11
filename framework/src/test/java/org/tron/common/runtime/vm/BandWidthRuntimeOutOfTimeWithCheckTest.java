@@ -21,6 +21,7 @@ import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 import org.tron.common.BaseTest;
+import org.tron.common.TestConstants;
 import org.tron.common.runtime.RuntimeImpl;
 import org.tron.common.runtime.TvmTestUtils;
 import org.tron.common.utils.Commons;
@@ -34,6 +35,7 @@ import org.tron.core.exception.AccountResourceInsufficientException;
 import org.tron.core.exception.ContractExeException;
 import org.tron.core.exception.ContractValidateException;
 import org.tron.core.exception.ReceiptCheckErrException;
+import org.tron.core.exception.TooBigTransactionException;
 import org.tron.core.exception.TooBigTransactionResultException;
 import org.tron.core.exception.TronException;
 import org.tron.core.exception.VMIllegalException;
@@ -62,22 +64,18 @@ public class BandWidthRuntimeOutOfTimeWithCheckTest extends BaseTest {
 
   public static final long totalBalance = 1000_0000_000_000L;
   private static final String dbDirectory = "db_BandWidthRuntimeOutOfTimeTest_test";
-  private static final String indexDirectory = "index_BandWidthRuntimeOutOfTimeTest_test";
   private static final String OwnerAddress = "TCWHANtDDdkZCTo2T2peyEq3Eg9c2XB7ut";
   private static final String TriggerOwnerAddress = "TCSgeWapPJhCqgWRxXCKb6jJ5AgNWSGjPA";
   private static boolean init;
 
   static {
-    dbPath = "output_bandwidth_runtime_out_of_time_with_check_test";
     Args.setParam(
         new String[]{
-            "--output-directory", dbPath,
+            "--output-directory", dbPath(),
             "--storage-db-directory", dbDirectory,
-            "--storage-index-directory", indexDirectory,
-            "-w",
             "--debug"
         },
-        "config-test-mainnet.conf"
+        TestConstants.TEST_CONF
     );
   }
 
@@ -157,7 +155,8 @@ public class BandWidthRuntimeOutOfTimeWithCheckTest extends BaseTest {
 
   private byte[] createContract()
       throws ContractValidateException, AccountResourceInsufficientException,
-      TooBigTransactionResultException, ContractExeException, VMIllegalException {
+      TooBigTransactionResultException, ContractExeException, VMIllegalException,
+      TooBigTransactionException {
     AccountCapsule owner = dbManager.getAccountStore()
         .get(Commons.decodeFromBase58Check(OwnerAddress));
     long energy = owner.getEnergyUsage();

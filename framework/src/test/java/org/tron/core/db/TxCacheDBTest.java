@@ -1,20 +1,16 @@
 package org.tron.core.db;
 
-import javax.annotation.Resource;
 import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.tron.common.BaseTest;
-import org.tron.common.application.Application;
+import org.tron.common.TestConstants;
 import org.tron.common.utils.ByteArray;
-import org.tron.core.Constant;
 import org.tron.core.capsule.BytesCapsule;
 import org.tron.core.config.args.Args;
 import org.tron.keystore.Wallet;
 
 public class TxCacheDBTest extends BaseTest {
-  @Resource
-  private Application appT;
 
   /**
    * Init data.
@@ -22,10 +18,8 @@ public class TxCacheDBTest extends BaseTest {
   @BeforeClass
   public static void init() {
     String dbDirectory = "db_TransactionCache_test";
-    String indexDirectory = "index_TransactionCache_test";
-    dbPath = "output_TransactionCache_test";
-    Args.setParam(new String[]{"--output-directory", dbPath, "--storage-db-directory",
-        dbDirectory, "--storage-index-directory", indexDirectory, "-w"}, Constant.TEST_CONF);
+    Args.setParam(new String[]{"--output-directory", dbPath(), "--storage-db-directory",
+        dbDirectory}, TestConstants.TEST_CONF);
   }
 
   @Test

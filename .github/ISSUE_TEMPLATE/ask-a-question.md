@@ -1,28 +1,51 @@
 ---
 name: Ask a question
-about: Something is unclear
-title: ''
-labels: ''
+about: Something is unclear or needs clarification
+title: '[Question]'
+labels: 'type:docs'
 assignees: ''
 
 ---
 
-<!-- Please answer these questions before submitting your issue. Thanks! -->
+<!-- 
+⚠️ IMPORTANT: Please read before submitting
 
-### System information
+This template should only be used in rare cases, such as:
+- You're unsure if something is a bug or expected behavior
+- Your question could lead to documentation improvements
+- You need clarification on technical implementation details
 
-java-tron version: `java -jar FullNode.jar -v`
-OS & Version: Windows/Linux/OSX
+For general questions, please use our community channels:
+- Discord: https://discord.gg/cGKSsRVCGm
+- Telegram: https://t.me/TronOfficialDevelopersGroupEn
 
+These channels provide faster responses for general inquiries.
+-->
 
-### 1. What did you do?
-<!--If possible, provide a recipe for reproducing the error. -->
+## Question
 
+<!-- Clearly describe what you need clarification on -->
 
-### 2. What did you expect to see?
+## Context
 
+<!-- Provide relevant context that helps us understand your question -->
 
+**What are you trying to achieve?**
+<!-- Describe your goal or use case -->
 
-### 3. What did you see instead?
+**What have you tried so far?**
+<!-- List any approaches or solutions you've attempted -->
 
+**Relevant documentation or code**
+<!-- Link to relevant documentation, code sections, or examples -->
 
+## Environment (if applicable)
+
+- Network: <!-- e.g., Mainnet -->
+- java-tron version: <!-- e.g., 4.7.4 -->
+- Operating System: <!-- e.g., Ubuntu 20.04 -->
+- Java version: <!-- e.g., java version "1.8.0_391" -->
+
+## Additional Information (Optional)
+
+<!-- Any other details that might be helpful -->

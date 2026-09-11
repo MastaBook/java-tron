@@ -22,7 +22,7 @@ FULL_NODE_DIR="FullNode"
 FULL_NODE_CONFIG_DIR="config"
 # config file
 FULL_NODE_CONFIG_MAIN_NET="main_net_config.conf"
-FULL_NODE_CONFIG_TEST_NET="test_net_config.conf.conf"
+FULL_NODE_CONFIG_TEST_NET="test_net_config.conf"
 FULL_NODE_CONFIG_PRIVATE_NET="private_net_config.conf"
 DEFAULT_FULL_NODE_CONFIG='config.conf'
 JAR_NAME="FullNode.jar"
@@ -358,7 +358,8 @@ startService() {
   nohup $JAVACMD -Xms$JVM_MS -Xmx$JVM_MX -XX:+UseConcMarkSweepGC -XX:+PrintGCDetails -Xloggc:./gc.log \
     -XX:+PrintGCDateStamps -XX:+CMSParallelRemarkEnabled -XX:ReservedCodeCacheSize=256m -XX:+UseCodeCacheFlushing \
     -XX:MetaspaceSize=256m -XX:MaxMetaspaceSize=512m \
-    -XX:MaxDirectMemorySize=$MAX_DIRECT_MEMORY -XX:+HeapDumpOnOutOfMemoryError \
+    -XX:MaxDirectMemorySize=$MAX_DIRECT_MEMORY -Dio.netty.allocator.type=pooled \
+    -XX:+HeapDumpOnOutOfMemoryError \
     -XX:NewRatio=2 -jar \
     $JAR_NAME $FULL_START_OPT >>start.log 2>&1 &
   checkPid

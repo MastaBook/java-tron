@@ -3,18 +3,22 @@ package org.tron.common.logsfilter;
 import com.beust.jcommander.internal.Sets;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.base.Strings;
 import java.io.File;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
+import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.bouncycastle.util.encoders.Hex;
 import org.pf4j.CompoundPluginDescriptorFinder;
 import org.pf4j.DefaultPluginManager;
+import org.pf4j.DefaultVersionManager;
 import org.pf4j.ManifestPluginDescriptorFinder;
 import org.pf4j.PluginManager;
+import org.pf4j.VersionManager;
 import org.springframework.util.StringUtils;
 import org.tron.common.logsfilter.nativequeue.NativeMessageQueue;
 import org.tron.common.logsfilter.trigger.BlockLogTrigger;
@@ -28,7 +32,19 @@ import org.tron.common.logsfilter.trigger.Trigger;
 @Slf4j
 public class EventPluginLoader {
 
+  /**
+   * Minimum event-plugin Plugin-Version compatible with this node. Bumped to 3.0.0 to
+   * reject pre-fastjson-removal builds whose worker threads would fail with
+   * NoClassDefFoundError on com.alibaba.fastjson at runtime. The previous event-plugin
+   * release is 2.2.0, so 3.0.0 is the first version that ships the Jackson replacement.
+   */
+  static final String MIN_PLUGIN_VERSION = "3.0.0";
+
+  private static final VersionManager VERSION_MANAGER = new DefaultVersionManager();
+
   private static EventPluginLoader instance;
+
+  private long MAX_PENDING_SIZE = 50000;
 
   private PluginManager pluginManager = null;
 
@@ -41,6 +57,10 @@ public class EventPluginLoader {
   private String dbConfig;
 
   private List<TriggerConfig> triggerConfigList;
+
+  private int version = 0;
+
+  private long startSyncBlockNum = 0;
 
   private boolean blockLogTriggerEnable = false;
 
@@ -68,6 +88,7 @@ public class EventPluginLoader {
 
   private FilterQuery filterQuery;
 
+  @Getter
   private boolean useNativeQueue = false;
 
   public static EventPluginLoader getInstance() {
@@ -130,7 +151,7 @@ public class EventPluginLoader {
 
   private static boolean filterContractAddress(ContractTrigger trigger, List<String> addressList) {
     addressList = addressList.stream().filter(item ->
-        org.apache.commons.lang3.StringUtils.isNotEmpty(item))
+            org.apache.commons.lang3.StringUtils.isNotEmpty(item))
         .collect(Collectors.toList());
     if (Objects.isNull(addressList) || addressList.isEmpty()) {
       return true;
@@ -163,7 +184,7 @@ public class EventPluginLoader {
       hset = new HashSet<>(((ContractEventTrigger) trigger).getTopicMap().values());
     } else if (trigger != null) {
       hset = trigger.getLogInfo().getClonedTopics()
-              .stream().map(Hex::toHexString).collect(Collectors.toSet());
+          .stream().map(Hex::toHexString).collect(Collectors.toSet());
     }
 
     for (String top : topList) {
@@ -218,6 +239,10 @@ public class EventPluginLoader {
     if (Objects.isNull(config)) {
       return false;
     }
+
+    this.version = config.getVersion();
+
+    this.startSyncBlockNum = config.getStartSyncBlockNum();
 
     this.triggerConfigList = config.getTriggerConfigList();
 
@@ -358,6 +383,14 @@ public class EventPluginLoader {
     }
   }
 
+  public synchronized int getVersion() {
+    return version;
+  }
+
+  public synchronized long getStartSyncBlockNum() {
+    return startSyncBlockNum;
+  }
+
   public synchronized boolean isBlockLogTriggerEnable() {
     return blockLogTriggerEnable;
   }
@@ -437,6 +470,10 @@ public class EventPluginLoader {
       return false;
     }
 
+    if (!isPluginVersionSupported(pluginManager, pluginId)) {
+      return false;
+    }
+
     pluginManager.startPlugins();
 
     eventListeners = pluginManager.getExtensions(IPluginEventListener.class);
@@ -449,6 +486,21 @@ public class EventPluginLoader {
     logger.info("'{}' loaded", path);
 
     return true;
+  }
+
+  static boolean isPluginVersionSupported(PluginManager pm, String pluginId) {
+    String pluginVersion = pm.getPlugin(pluginId).getDescriptor().getVersion();
+    if (Strings.isNullOrEmpty(pluginVersion)) {
+      return false;
+    }
+    boolean isSupported = VERSION_MANAGER.compareVersions(pluginVersion, MIN_PLUGIN_VERSION) >= 0;
+
+    if (!isSupported) {
+      logger.error(
+          "event-plugin '{}' version {} is older than required {}, please upgrade event-plugin",
+          pluginId, pluginVersion, MIN_PLUGIN_VERSION);
+    }
+    return isSupported;
   }
 
   public void stopPlugin() {
@@ -518,6 +570,25 @@ public class EventPluginLoader {
       eventListeners.forEach(listener ->
           listener.handleContractEventTrigger(toJsonString(trigger)));
     }
+  }
+
+  public boolean isBusy() {
+    if (useNativeQueue) {
+      return false;
+    }
+    int queueSize = 0;
+    if (eventListeners == null || eventListeners.isEmpty()) {
+      // only occurs in mock test. TODO fix test
+      return false;
+    }
+    for (IPluginEventListener listener : eventListeners) {
+      try {
+        queueSize += listener.getPendingSize();
+      } catch (AbstractMethodError error) {
+        break;
+      }
+    }
+    return queueSize >= MAX_PENDING_SIZE;
   }
 
   private String toJsonString(Object data) {

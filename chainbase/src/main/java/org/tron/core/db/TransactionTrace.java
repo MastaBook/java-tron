@@ -1,7 +1,10 @@
 package org.tron.core.db;
 
+import static org.tron.common.math.Maths.max;
+import static org.tron.common.math.Maths.min;
 import static org.tron.common.runtime.InternalTransaction.TrxType.TRX_CONTRACT_CALL_TYPE;
 import static org.tron.common.runtime.InternalTransaction.TrxType.TRX_CONTRACT_CREATION_TYPE;
+import static org.tron.protos.contract.Common.ResourceCode.ENERGY;
 
 import java.util.Objects;
 import lombok.Getter;
@@ -37,7 +40,6 @@ import org.tron.core.store.StoreFactory;
 import org.tron.protos.Protocol.Transaction;
 import org.tron.protos.Protocol.Transaction.Contract.ContractType;
 import org.tron.protos.Protocol.Transaction.Result.contractResult;
-import org.tron.protos.contract.Common;
 import org.tron.protos.contract.SmartContractOuterClass.SmartContract.ABI;
 import org.tron.protos.contract.SmartContractOuterClass.TriggerSmartContract;
 
@@ -242,9 +244,11 @@ public class TransactionTrace {
 
         callerAccount = callContract.getOwnerAddress().toByteArray();
         originAccount = contractCapsule.getOriginAddress();
-        percent = Math
-            .max(Constant.ONE_HUNDRED - contractCapsule.getConsumeUserResourcePercent(), 0);
-        percent = Math.min(percent, Constant.ONE_HUNDRED);
+        boolean disableJavaLangMath = dynamicPropertiesStore.disableJavaLangMath();
+        percent = max(Constant.ONE_HUNDRED - contractCapsule.getConsumeUserResourcePercent(
+            disableJavaLangMath), 0, disableJavaLangMath);
+        percent = min(percent, Constant.ONE_HUNDRED,
+            disableJavaLangMath);
         originEnergyLimit = contractCapsule.getOriginEnergyLimit();
         break;
       default:
@@ -263,14 +267,16 @@ public class TransactionTrace {
             receipt.getOriginEnergyUsage(),
             receipt.getOriginEnergyWindowSize(),
             receipt.getOriginEnergyMergedUsage(),
-            receipt.getOriginEnergyMergedWindowSize());
+            receipt.getOriginEnergyMergedWindowSize(),
+            receipt.getOriginEnergyWindowSizeV2());
       }
 
       resetAccountUsage(caller,
           receipt.getCallerEnergyUsage(),
           receipt.getCallerEnergyWindowSize(),
           receipt.getCallerEnergyMergedUsage(),
-          receipt.getCallerEnergyMergedWindowSize());
+          receipt.getCallerEnergyMergedWindowSize(),
+          receipt.getCallerEnergyWindowSizeV2());
     }
     receipt.payEnergyBill(
         dynamicPropertiesStore, accountStore, forkController,
@@ -282,8 +288,12 @@ public class TransactionTrace {
   }
 
   private void resetAccountUsage(AccountCapsule accountCap,
-      long usage, long size, long mergedUsage, long mergedSize) {
-    long currentSize = accountCap.getWindowSize(Common.ResourceCode.ENERGY);
+      long usage, long size, long mergedUsage, long mergedSize, long size2) {
+    if (dynamicPropertiesStore.supportAllowCancelAllUnfreezeV2()) {
+      resetAccountUsageV2(accountCap, usage, size, mergedUsage, mergedSize, size2);
+      return;
+    }
+    long currentSize = accountCap.getWindowSize(ENERGY);
     long currentUsage = accountCap.getEnergyUsage();
     // Drop the pre consumed frozen energy
     long newArea = currentUsage * currentSize
@@ -291,11 +301,27 @@ public class TransactionTrace {
     // If area merging happened during suicide, use the current window size
     long newSize = mergedSize == currentSize ? size : currentSize;
     // Calc new usage by fixed x-axes
-    long newUsage = Long.max(0, newArea / newSize);
+    long newUsage = max(0, newArea / newSize, dynamicPropertiesStore.disableJavaLangMath());
     // Reset account usage and window size
     accountCap.setEnergyUsage(newUsage);
-    accountCap.setNewWindowSize(Common.ResourceCode.ENERGY,
-        newUsage == 0 ? 0L : newSize);
+    accountCap.setNewWindowSize(ENERGY, newUsage == 0 ? 0L : newSize);
+  }
+
+  private void resetAccountUsageV2(AccountCapsule accountCap,
+      long usage, long size, long mergedUsage, long mergedSize, long size2) {
+    long currentSize = accountCap.getWindowSize(ENERGY);
+    long currentSize2 = accountCap.getWindowSizeV2(ENERGY);
+    long currentUsage = accountCap.getEnergyUsage();
+    // Drop the pre consumed frozen energy
+    long newArea = currentUsage * currentSize - (mergedUsage * mergedSize - usage * size);
+    // If area merging happened during suicide, use the current window size
+    long newSize = mergedSize == currentSize ? size : currentSize;
+    long newSize2 = mergedSize == currentSize ? size2 : currentSize2;
+    // Calc new usage by fixed x-axes
+    long newUsage = max(0, newArea / newSize, dynamicPropertiesStore.disableJavaLangMath());
+    // Reset account usage and window size
+    accountCap.setEnergyUsage(newUsage);
+    accountCap.setNewWindowSizeV2(ENERGY, newUsage == 0 ? 0L : newSize2);
   }
 
   public boolean checkNeedRetry() {
@@ -354,7 +380,7 @@ public class TransactionTrace {
   public static byte[] convertToTronAddress(byte[] address) {
     if (address.length == 20) {
       byte[] newAddress = new byte[21];
-      byte[] temp = new byte[]{DecodeUtil.addressPreFixByte};
+      byte[] temp = new byte[] {DecodeUtil.addressPreFixByte};
       System.arraycopy(temp, 0, newAddress, 0, temp.length);
       System.arraycopy(address, 0, newAddress, temp.length, address.length);
       address = newAddress;

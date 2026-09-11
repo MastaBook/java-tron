@@ -1,5 +1,9 @@
 package org.tron.core.store;
 
+import static org.tron.common.math.Maths.max;
+import static org.tron.core.Constant.MAX_PROPOSAL_EXPIRE_TIME;
+import static org.tron.core.Constant.MIN_PROPOSAL_EXPIRE_TIME;
+import static org.tron.core.config.Parameter.ChainConstant.BLOCK_PRODUCED_INTERVAL;
 import static org.tron.core.config.Parameter.ChainConstant.DELEGATE_PERIOD;
 
 import com.google.protobuf.ByteString;
@@ -215,6 +219,44 @@ public class DynamicPropertiesStore extends TronStoreWithRevoking<BytesCapsule> 
 
   private static final byte[] MAX_DELEGATE_LOCK_PERIOD =
       "MAX_DELEGATE_LOCK_PERIOD".getBytes();
+
+  private static final byte[] ALLOW_OLD_REWARD_OPT = "ALLOW_OLD_REWARD_OPT".getBytes();
+
+  private static final byte[] ALLOW_ENERGY_ADJUSTMENT = "ALLOW_ENERGY_ADJUSTMENT".getBytes();
+
+  private static final byte[] MAX_CREATE_ACCOUNT_TX_SIZE = "MAX_CREATE_ACCOUNT_TX_SIZE".getBytes();
+  private static final byte[] ALLOW_STRICT_MATH = "ALLOW_STRICT_MATH".getBytes();
+
+  private static final byte[] CONSENSUS_LOGIC_OPTIMIZATION
+      = "CONSENSUS_LOGIC_OPTIMIZATION".getBytes();
+
+  private static final byte[] ALLOW_TVM_CANCUN = "ALLOW_TVM_CANCUN".getBytes();
+
+  private static final byte[] ALLOW_TVM_BLOB = "ALLOW_TVM_BLOB".getBytes();
+  private static final byte[] PROPOSAL_EXPIRE_TIME = "PROPOSAL_EXPIRE_TIME".getBytes();
+
+  private static final byte[] ALLOW_TVM_SELFDESTRUCT_RESTRICTION =
+      "ALLOW_TVM_SELFDESTRUCT_RESTRICTION".getBytes();
+
+  private static final byte[] ALLOW_TVM_OSAKA = "ALLOW_TVM_OSAKA".getBytes();
+
+  private static final byte[] ALLOW_TVM_PRAGUE = "ALLOW_TVM_PRAGUE".getBytes();
+
+  // TIP-2935 install marker — flipped to 1 inside HistoryBlockHashUtil.deploy()
+  // only after the three store writes succeed. Stays 0 when deploy() skips on
+  // foreign-state collision; HistoryBlockHashUtil.write() reads this to decide
+  // whether StorageRowStore at the canonical address is ours to mutate.
+  private static final byte[] BLOCK_HASH_HISTORY_INSTALLED =
+      "BLOCK_HASH_HISTORY_INSTALLED".getBytes();
+
+  private static final byte[] ALLOW_HARDEN_RESOURCE_CALCULATION =
+      "ALLOW_HARDEN_RESOURCE_CALCULATION".getBytes();
+
+  private static final byte[] ALLOW_HARDEN_EXCHANGE_CALCULATION =
+      "ALLOW_HARDEN_EXCHANGE_CALCULATION".getBytes();
+
+  private static final byte[] TURKISH_KEY_MIGRATION_DONE =
+      "TURKISH_KEY_MIGRATION_DONE".getBytes();
 
   @Autowired
   private DynamicPropertiesStore(@Value("properties") String dbName) {
@@ -2232,7 +2274,7 @@ public class DynamicPropertiesStore extends TronStoreWithRevoking<BytesCapsule> 
     long totalNetWeight = getTotalNetWeight();
     totalNetWeight += amount;
     if (allowNewReward()) {
-      totalNetWeight = Math.max(0, totalNetWeight);
+      totalNetWeight = max(0, totalNetWeight, disableJavaLangMath());
     }
     saveTotalNetWeight(totalNetWeight);
   }
@@ -2245,7 +2287,7 @@ public class DynamicPropertiesStore extends TronStoreWithRevoking<BytesCapsule> 
     long totalEnergyWeight = getTotalEnergyWeight();
     totalEnergyWeight += amount;
     if (allowNewReward()) {
-      totalEnergyWeight = Math.max(0, totalEnergyWeight);
+      totalEnergyWeight = max(0, totalEnergyWeight, disableJavaLangMath());
     }
     saveTotalEnergyWeight(totalEnergyWeight);
   }
@@ -2258,7 +2300,7 @@ public class DynamicPropertiesStore extends TronStoreWithRevoking<BytesCapsule> 
     long totalWeight = getTotalTronPowerWeight();
     totalWeight += amount;
     if (allowNewReward()) {
-      totalWeight = Math.max(0, totalWeight);
+      totalWeight = max(0, totalWeight, disableJavaLangMath());
     }
     saveTotalTronPowerWeight(totalWeight);
   }
@@ -2824,11 +2866,221 @@ public class DynamicPropertiesStore extends TronStoreWithRevoking<BytesCapsule> 
     return Optional.ofNullable(getUnchecked(MAX_DELEGATE_LOCK_PERIOD))
         .map(BytesCapsule::getData)
         .map(ByteArray::toLong)
-        .orElse(DELEGATE_PERIOD / 3000);
+        .orElse(DELEGATE_PERIOD / BLOCK_PRODUCED_INTERVAL);
   }
 
   public boolean supportMaxDelegateLockPeriod() {
-    return (getMaxDelegateLockPeriod() > DELEGATE_PERIOD / 3000) && getUnfreezeDelayDays() > 0;
+    return (getMaxDelegateLockPeriod() > DELEGATE_PERIOD / BLOCK_PRODUCED_INTERVAL) &&
+            getUnfreezeDelayDays() > 0;
+  }
+
+  public void saveAllowOldRewardOpt(long allowOldRewardOpt) {
+    this.put(ALLOW_OLD_REWARD_OPT, new BytesCapsule(ByteArray.fromLong(allowOldRewardOpt)));
+  }
+
+  public boolean allowOldRewardOpt() {
+    return getAllowOldRewardOpt() == 1L;
+  }
+
+  public long getAllowOldRewardOpt() {
+    return Optional.ofNullable(getUnchecked(ALLOW_OLD_REWARD_OPT))
+        .map(BytesCapsule::getData)
+        .map(ByteArray::toLong)
+        .orElse(CommonParameter.getInstance().getAllowOldRewardOpt());
+  }
+
+  public void saveAllowEnergyAdjustment(long allowEnergyAdjustment) {
+    this.put(ALLOW_ENERGY_ADJUSTMENT, new BytesCapsule(ByteArray.fromLong(allowEnergyAdjustment)));
+  }
+
+  public long getAllowEnergyAdjustment() {
+    return Optional.ofNullable(getUnchecked(ALLOW_ENERGY_ADJUSTMENT))
+            .map(BytesCapsule::getData)
+            .map(ByteArray::toLong)
+            .orElse(CommonParameter.getInstance().getAllowEnergyAdjustment());
+  }
+
+  public void saveMaxCreateAccountTxSize(long maxCreateAccountTxSize) {
+    this.put(MAX_CREATE_ACCOUNT_TX_SIZE,
+        new BytesCapsule(ByteArray.fromLong(maxCreateAccountTxSize)));
+  }
+
+  public long getMaxCreateAccountTxSize() {
+    return Optional.ofNullable(getUnchecked(MAX_CREATE_ACCOUNT_TX_SIZE))
+        .map(BytesCapsule::getData)
+        .map(ByteArray::toLong)
+        .orElse(CommonParameter.getInstance().getMaxCreateAccountTxSize());
+  }
+  public long getAllowStrictMath() {
+    return Optional.ofNullable(getUnchecked(ALLOW_STRICT_MATH))
+        .map(BytesCapsule::getData)
+        .map(ByteArray::toLong)
+        .orElse(CommonParameter.getInstance().getAllowStrictMath());
+  }
+  public void saveAllowStrictMath(long allowStrictMath) {
+    this.put(ALLOW_STRICT_MATH, new BytesCapsule(ByteArray.fromLong(allowStrictMath)));
+  }
+
+  public boolean allowStrictMath() {
+    return getAllowStrictMath() == 1L;
+  }
+
+  public boolean disableJavaLangMath() {
+    return this.allowConsensusLogicOptimization();
+  }
+
+  public void saveConsensusLogicOptimization(long value) {
+    this.put(CONSENSUS_LOGIC_OPTIMIZATION,
+      new BytesCapsule(ByteArray.fromLong(value)));
+  }
+
+  public long getConsensusLogicOptimization() {
+    return Optional.ofNullable(getUnchecked(CONSENSUS_LOGIC_OPTIMIZATION))
+      .map(BytesCapsule::getData)
+      .map(ByteArray::toLong)
+      .orElse(CommonParameter.getInstance().getConsensusLogicOptimization());
+  }
+
+  public boolean allowConsensusLogicOptimization() {
+    return getConsensusLogicOptimization() == 1L;
+  }
+
+  public boolean allowWitnessSortOptimization() {
+    return this.allowConsensusLogicOptimization();
+  }
+
+  public void saveAllowTvmCancun(long allowTvmCancun) {
+    this.put(ALLOW_TVM_CANCUN,
+        new BytesCapsule(ByteArray.fromLong(allowTvmCancun)));
+  }
+
+  public long getAllowTvmCancun() {
+    return Optional.ofNullable(getUnchecked(ALLOW_TVM_CANCUN))
+        .map(BytesCapsule::getData)
+        .map(ByteArray::toLong)
+        .orElse(CommonParameter.getInstance().getAllowTvmCancun());
+  }
+
+  public void saveAllowTvmBlob(long allowTvmBlob) {
+    this.put(ALLOW_TVM_BLOB, new BytesCapsule(ByteArray.fromLong(allowTvmBlob)));
+  }
+
+  public long getAllowTvmBlob() {
+    return Optional.ofNullable(getUnchecked(ALLOW_TVM_BLOB))
+        .map(BytesCapsule::getData)
+        .map(ByteArray::toLong)
+        .orElse(CommonParameter.getInstance().getAllowTvmBlob());
+  }
+
+
+  public long getAllowTvmSelfdestructRestriction() {
+    return Optional.ofNullable(getUnchecked(ALLOW_TVM_SELFDESTRUCT_RESTRICTION))
+        .map(BytesCapsule::getData)
+        .map(ByteArray::toLong)
+        .orElse(0L);
+  }
+
+  public void saveAllowTvmSelfdestructRestriction(long value) {
+    this.put(ALLOW_TVM_SELFDESTRUCT_RESTRICTION, new BytesCapsule(ByteArray.fromLong(value)));
+  }
+
+  public boolean allowTvmSelfdestructRestriction() {
+    return getAllowTvmSelfdestructRestriction() == 1L;
+  }
+  
+  public void saveProposalExpireTime(long proposalExpireTime) {
+    this.put(PROPOSAL_EXPIRE_TIME, new BytesCapsule(ByteArray.fromLong(proposalExpireTime)));
+  }
+
+  public long getProposalExpireTime() {
+    return Optional.ofNullable(getUnchecked(PROPOSAL_EXPIRE_TIME))
+        .map(BytesCapsule::getData)
+        .map(ByteArray::toLong)
+        .filter(time -> time > MIN_PROPOSAL_EXPIRE_TIME && time < MAX_PROPOSAL_EXPIRE_TIME)
+        .orElse(CommonParameter.getInstance().getProposalExpireTime());
+  }
+
+  public long getAllowTvmOsaka() {
+    return Optional.ofNullable(getUnchecked(ALLOW_TVM_OSAKA))
+        .map(BytesCapsule::getData)
+        .map(ByteArray::toLong)
+        .orElse(0L);
+  }
+
+  public void saveAllowTvmOsaka(long value) {
+    this.put(ALLOW_TVM_OSAKA, new BytesCapsule(ByteArray.fromLong(value)));
+  }
+
+  public long getAllowTvmPrague() {
+    return Optional.ofNullable(getUnchecked(ALLOW_TVM_PRAGUE))
+        .map(BytesCapsule::getData)
+        .map(ByteArray::toLong)
+        .orElse(0L);
+  }
+
+  public void saveAllowTvmPrague(long value) {
+    this.put(ALLOW_TVM_PRAGUE, new BytesCapsule(ByteArray.fromLong(value)));
+  }
+
+  public boolean allowTvmPrague() {
+    return getAllowTvmPrague() == 1L;
+  }
+
+  public long getBlockHashHistoryInstalled() {
+    return Optional.ofNullable(getUnchecked(BLOCK_HASH_HISTORY_INSTALLED))
+        .map(BytesCapsule::getData)
+        .map(ByteArray::toLong)
+        .orElse(0L);
+  }
+
+  public void saveBlockHashHistoryInstalled(long value) {
+    this.put(BLOCK_HASH_HISTORY_INSTALLED, new BytesCapsule(ByteArray.fromLong(value)));
+  }
+
+  public boolean isBlockHashHistoryInstalled() {
+    return getBlockHashHistoryInstalled() == 1L;
+  }
+
+  public long getAllowHardenResourceCalculation() {
+    return Optional.ofNullable(getUnchecked(ALLOW_HARDEN_RESOURCE_CALCULATION))
+        .map(BytesCapsule::getData)
+        .map(ByteArray::toLong)
+        .orElse(0L);
+  }
+
+  public void saveAllowHardenResourceCalculation(long value) {
+    this.put(ALLOW_HARDEN_RESOURCE_CALCULATION, new BytesCapsule(ByteArray.fromLong(value)));
+  }
+
+  public boolean allowHardenResourceCalculation() {
+    return getAllowHardenResourceCalculation() == 1L;
+  }
+
+  public long getAllowHardenExchangeCalculation() {
+    return Optional.ofNullable(getUnchecked(ALLOW_HARDEN_EXCHANGE_CALCULATION))
+        .map(BytesCapsule::getData)
+        .map(ByteArray::toLong)
+        .orElse(0L);
+  }
+
+  public void saveAllowHardenExchangeCalculation(long value) {
+    this.put(ALLOW_HARDEN_EXCHANGE_CALCULATION, new BytesCapsule(ByteArray.fromLong(value)));
+  }
+
+  public boolean allowHardenExchangeCalculation() {
+    return getAllowHardenExchangeCalculation() == 1L;
+  }
+
+  public void saveTurkishKeyMigrationDone(long num) {
+    this.put(TURKISH_KEY_MIGRATION_DONE,
+        new BytesCapsule(ByteArray.fromLong(num)));
+  }
+
+  public long getTurkishKeyMigrationDone() {
+    return Optional.ofNullable(getUnchecked(TURKISH_KEY_MIGRATION_DONE))
+        .map(BytesCapsule::getData)
+        .map(ByteArray::toLong)
+        .orElse(0L);
   }
 
   private static class DynamicResourceProperties {

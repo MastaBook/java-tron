@@ -7,7 +7,6 @@ import static org.tron.common.utils.ByteUtil.EMPTY_BYTE_ARRAY;
 import static org.tron.core.capsule.utils.RLP.EMPTY_ELEMENT_RLP;
 import static org.tron.core.capsule.utils.RLP.encodeList;
 
-import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -15,13 +14,13 @@ import java.util.List;
 import java.util.Map.Entry;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import org.apache.commons.lang3.text.StrBuilder;
 import org.bouncycastle.util.encoders.Hex;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.tron.common.crypto.Hash;
+import org.tron.common.es.ExecutorServiceManager;
 import org.tron.core.capsule.BytesCapsule;
 import org.tron.core.capsule.utils.FastByteComparisons;
 import org.tron.core.capsule.utils.RLP;
@@ -60,8 +59,7 @@ public class TrieImpl implements Trie<byte[]> {
 
   public static ExecutorService getExecutor() {
     if (executor == null) {
-      executor = Executors.newFixedThreadPool(4,
-          new ThreadFactoryBuilder().setNameFormat("trie-calc-thread-%d").build());
+      executor = ExecutorServiceManager.newFixedThreadPool("trie-calc", 4);
     }
     return executor;
   }
@@ -181,14 +179,18 @@ public class TrieImpl implements Trie<byte[]> {
     } else {
       TrieKey currentNodeKey = n.kvNodeGetKey();
       TrieKey commonPrefix = k.getCommonPrefix(currentNodeKey);
-      if (commonPrefix.isEmpty()) {
+      // NOTE: equals(k) MUST precede isEmpty(). They overlap only when both k and
+      // currentNodeKey are empty (duplicate put on a fully-split KV leaf); in that
+      // case the correct behavior is an in-place value update, not conversion to
+      // a BranchNode. Swapping the order corrupts the trie structure. See #6608.
+      if (commonPrefix.equals(k)) {
+        return n.kvNodeSetValueOrNode(nodeOrValue);
+      } else if (commonPrefix.isEmpty()) {
         Node newBranchNode = new Node();
         insert(newBranchNode, currentNodeKey, n.kvNodeGetValueOrNode());
         insert(newBranchNode, k, nodeOrValue);
         n.dispose();
         return newBranchNode;
-      } else if (commonPrefix.equals(k)) {
-        return n.kvNodeSetValueOrNode(nodeOrValue);
       } else if (commonPrefix.equals(currentNodeKey)) {
         insert(n.kvNodeGetChildNode(), k.shift(commonPrefix.getLength()), nodeOrValue);
         return n.invalidate();
@@ -875,6 +877,11 @@ public class TrieImpl implements Trie<byte[]> {
     public Node kvNodeSetValueOrNode(Object valueOrNode) {
       parse();
       assert getType() != NodeType.BranchNode;
+      if (valueOrNode instanceof byte[] && children[1] instanceof byte[]
+          && (children[1] == valueOrNode
+          || Arrays.equals((byte[]) children[1], (byte[]) valueOrNode))) {
+        return this;
+      }
       children[1] = valueOrNode;
       dirty = true;
       return this;

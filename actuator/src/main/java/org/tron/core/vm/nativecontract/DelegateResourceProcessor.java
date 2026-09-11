@@ -3,12 +3,13 @@ package org.tron.core.vm.nativecontract;
 import static org.tron.core.actuator.ActuatorConstant.NOT_EXIST_STR;
 import static org.tron.core.actuator.ActuatorConstant.STORE_NOT_EXIST;
 import static org.tron.core.config.Parameter.ChainConstant.TRX_PRECISION;
+import static org.tron.core.vm.utils.FreezeV2Util.getV2EnergyUsage;
+import static org.tron.core.vm.utils.FreezeV2Util.getV2NetUsage;
 
 import com.google.common.primitives.Bytes;
 import com.google.protobuf.ByteString;
 import java.util.Arrays;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.lang3.ArrayUtils;
 import org.tron.common.utils.DecodeUtil;
 import org.tron.common.utils.StringUtil;
 import org.tron.core.ChainBaseManager;
@@ -21,6 +22,7 @@ import org.tron.core.db.EnergyProcessor;
 import org.tron.core.exception.ContractValidateException;
 import org.tron.core.store.DelegatedResourceAccountIndexStore;
 import org.tron.core.store.DynamicPropertiesStore;
+import org.tron.core.vm.config.VMConfig;
 import org.tron.core.vm.nativecontract.param.DelegateResourceParam;
 import org.tron.core.vm.repository.Repository;
 import org.tron.protos.Protocol;
@@ -49,9 +51,10 @@ public class DelegateResourceProcessor {
     }
     long delegateBalance = param.getDelegateBalance();
     if (delegateBalance < TRX_PRECISION) {
-      throw new ContractValidateException("delegateBalance must be more than 1TRX");
+      throw new ContractValidateException("delegateBalance must be greater than or equal to 1 TRX");
     }
 
+    boolean disableJavaLangMath = VMConfig.disableJavaLangMath();
     switch (param.getResourceType()) {
       case BANDWIDTH: {
         BandwidthProcessor processor = new BandwidthProcessor(ChainBaseManager.getInstance());
@@ -60,16 +63,11 @@ public class DelegateResourceProcessor {
         long netUsage = (long) (ownerCapsule.getNetUsage() * TRX_PRECISION * ((double)
             (repo.getTotalNetWeight()) / dynamicStore.getTotalNetLimit()));
 
-        long remainNetUsage = netUsage
-                - ownerCapsule.getFrozenBalance()
-                - ownerCapsule.getAcquiredDelegatedFrozenBalanceForBandwidth()
-                - ownerCapsule.getAcquiredDelegatedFrozenV2BalanceForBandwidth();
+        long v2NetUsage = getV2NetUsage(ownerCapsule, netUsage, disableJavaLangMath);
 
-        remainNetUsage = Math.max(0, remainNetUsage);
-
-        if (ownerCapsule.getFrozenV2BalanceForBandwidth() - remainNetUsage < delegateBalance) {
+        if (ownerCapsule.getFrozenV2BalanceForBandwidth() - v2NetUsage < delegateBalance) {
           throw new ContractValidateException(
-                  "delegateBalance must be less than available FreezeBandwidthV2 balance");
+                  "delegateBalance must be less than or equal to available FreezeBandwidthV2 balance");
         }
       }
       break;
@@ -81,16 +79,11 @@ public class DelegateResourceProcessor {
         long energyUsage = (long) (ownerCapsule.getEnergyUsage() * TRX_PRECISION * ((double)
             (repo.getTotalEnergyWeight()) / dynamicStore.getTotalEnergyCurrentLimit()));
 
-        long remainEnergyUsage = energyUsage
-                - ownerCapsule.getEnergyFrozenBalance()
-                - ownerCapsule.getAcquiredDelegatedFrozenBalanceForEnergy()
-                - ownerCapsule.getAcquiredDelegatedFrozenV2BalanceForEnergy();
+        long v2EnergyUsage = getV2EnergyUsage(ownerCapsule, energyUsage, disableJavaLangMath);
 
-        remainEnergyUsage = Math.max(0, remainEnergyUsage);
-
-        if (ownerCapsule.getFrozenV2BalanceForEnergy() - remainEnergyUsage < delegateBalance) {
+        if (ownerCapsule.getFrozenV2BalanceForEnergy() - v2EnergyUsage < delegateBalance) {
           throw new ContractValidateException(
-                  "delegateBalance must be less than available FreezeEnergyV2 balance");
+                  "delegateBalance must be less than or equal to available FreezeEnergyV2 balance");
         }
       }
       break;
@@ -101,7 +94,7 @@ public class DelegateResourceProcessor {
 
     byte[] receiverAddress = param.getReceiverAddress();
 
-    if (ArrayUtils.isEmpty(receiverAddress) || !DecodeUtil.addressValid(receiverAddress)) {
+    if (!DecodeUtil.addressValid(receiverAddress)) {
       throw new ContractValidateException("Invalid receiverAddress");
     }
     if (Arrays.equals(receiverAddress, ownerAddress)) {

@@ -1,7 +1,5 @@
 package org.tron.core;
 
-import static org.tron.core.zksnark.LibrustzcashTest.librustzcashInitZksnarkParams;
-
 import com.google.protobuf.ByteString;
 import java.math.BigInteger;
 import java.util.Arrays;
@@ -11,8 +9,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.ArrayUtils;
 import org.apache.commons.lang3.tuple.Pair;
 import org.bouncycastle.util.encoders.Hex;
+import org.junit.AfterClass;
 import org.junit.Assert;
-import org.junit.Before;
+import org.junit.BeforeClass;
 import org.junit.Ignore;
 import org.junit.Test;
 import org.tron.api.GrpcAPI;
@@ -23,6 +22,7 @@ import org.tron.api.GrpcAPI.ShieldedTRC20Parameters;
 import org.tron.api.GrpcAPI.ShieldedTRC20TriggerContractParameters;
 import org.tron.api.GrpcAPI.SpendAuthSigParameters;
 import org.tron.common.BaseTest;
+import org.tron.common.TestConstants;
 import org.tron.common.utils.ByteArray;
 import org.tron.common.utils.ByteUtil;
 import org.tron.common.utils.PublicMethod;
@@ -37,10 +37,10 @@ import org.tron.core.config.args.Args;
 import org.tron.core.exception.ContractExeException;
 import org.tron.core.exception.ContractValidateException;
 import org.tron.core.exception.ZksnarkException;
-import org.tron.core.services.http.FullNodeHttpApiService;
 import org.tron.core.vm.PrecompiledContracts.VerifyBurnProof;
 import org.tron.core.vm.PrecompiledContracts.VerifyMintProof;
 import org.tron.core.vm.PrecompiledContracts.VerifyTransferProof;
+import org.tron.core.zen.ZksnarkInitService;
 import org.tron.core.zen.address.DiversifierT;
 import org.tron.core.zen.address.ExpandedSpendingKey;
 import org.tron.core.zen.address.FullViewingKey;
@@ -64,12 +64,10 @@ public class ShieldedTRC20BuilderTest extends BaseTest {
   private static final byte[] PUBLIC_TO_ADDRESS;
 
   static {
-    dbPath = "output_Shielded_TRC20_Api_test";
-    Args.setParam(new String[]{"--output-directory", dbPath}, "config-test-mainnet.conf");
+    Args.setParam(new String[]{"--output-directory", dbPath()}, TestConstants.TEST_CONF);
     SHIELDED_CONTRACT_ADDRESS = WalletClient.decodeFromBase58Check(SHIELDED_CONTRACT_ADDRESS_STR);
     DEFAULT_OVK = ByteArray
         .fromHexString("030c8c2bc59fb3eb8afb047a8ea4b028743d23e7d38c6fa30908358431e2314d");
-    FullNodeHttpApiService.librustzcashInitZksnarkParams();
     PUBLIC_TO_ADDRESS = WalletClient.decodeFromBase58Check(PUBLIC_TO_ADDRESS_STR);
   }
 
@@ -77,8 +75,18 @@ public class ShieldedTRC20BuilderTest extends BaseTest {
   VerifyTransferProof transferContract = new VerifyTransferProof();
   VerifyBurnProof burnContract = new VerifyBurnProof();
 
-  @Before
-  public void before() {
+  private static boolean origShieldedApi;
+
+  @BeforeClass
+  public static void initZksnarkParams() {
+    ZksnarkInitService.librustzcashInitZksnarkParams();
+    origShieldedApi = Args.getInstance().allowShieldedTransactionApi;
+    Args.getInstance().allowShieldedTransactionApi = true;
+  }
+
+  @AfterClass
+  public static void restoreShieldedApi() {
+    Args.getInstance().allowShieldedTransactionApi = origShieldedApi;
   }
 
   @Ignore
@@ -2173,7 +2181,6 @@ public class ShieldedTRC20BuilderTest extends BaseTest {
   @Ignore
   @Test
   public void getTriggerInputForForMint() throws Exception {
-    librustzcashInitZksnarkParams();
     SpendingKey sk = SpendingKey.random();
     ExpandedSpendingKey expsk = sk.expandedSpendingKey();
     byte[] ovk = expsk.getOvk();
@@ -2242,13 +2249,12 @@ public class ShieldedTRC20BuilderTest extends BaseTest {
   public void testScanShieldedTRC20NotesByIvk() throws Exception {
     int statNum = 1;
     int endNum = 100;
-    librustzcashInitZksnarkParams();
     SpendingKey sk = SpendingKey.decode(priKey);
     FullViewingKey fvk = sk.fullViewingKey();
     byte[] ivk = fvk.inViewingKey().value;
 
     GrpcAPI.DecryptNotesTRC20 scannedNotes = wallet.scanShieldedTRC20NotesByIvk(
-        statNum, endNum, SHIELDED_CONTRACT_ADDRESS, ivk, fvk.getAk(), fvk.getNk(), null);
+        statNum, endNum, SHIELDED_CONTRACT_ADDRESS, ivk, fvk.getAk(), fvk.getNk());
 
     for (GrpcAPI.DecryptNotesTRC20.NoteTx noteTx : scannedNotes.getNoteTxsList()) {
       logger.info(noteTx.toString());
@@ -2263,24 +2269,23 @@ public class ShieldedTRC20BuilderTest extends BaseTest {
     FullViewingKey fvk = sk.fullViewingKey();
 
     GrpcAPI.DecryptNotesTRC20 scannedNotes = wallet.scanShieldedTRC20NotesByOvk(
-        statNum, endNum, fvk.getOvk(), SHIELDED_CONTRACT_ADDRESS, null);
+        statNum, endNum, fvk.getOvk(), SHIELDED_CONTRACT_ADDRESS);
 
     for (GrpcAPI.DecryptNotesTRC20.NoteTx noteTx : scannedNotes.getNoteTxsList()) {
       logger.info(noteTx.toString());
     }
   }
 
-  @Test(expected = IllegalArgumentException.class)
+  @Test(expected = ZksnarkException.class)
   public void isShieldedTRC20ContractNoteSpent() throws Exception {
     int statNum = 9200;
     int endNum = 9240;
-    librustzcashInitZksnarkParams();
     SpendingKey sk = SpendingKey.decode(priKey);
     FullViewingKey fvk = sk.fullViewingKey();
     byte[] ivk = fvk.inViewingKey().value;
 
     GrpcAPI.DecryptNotesTRC20 scannedNotes = wallet.scanShieldedTRC20NotesByIvk(
-        statNum, endNum, SHIELDED_CONTRACT_ADDRESS, ivk, fvk.getAk(), fvk.getNk(), null);
+        statNum, endNum, SHIELDED_CONTRACT_ADDRESS, ivk, fvk.getAk(), fvk.getNk());
 
     for (GrpcAPI.DecryptNotesTRC20.NoteTx noteTx : scannedNotes.getNoteTxsList()) {
       logger.info(noteTx.toString());
@@ -2351,7 +2356,6 @@ public class ShieldedTRC20BuilderTest extends BaseTest {
   private GrpcAPI.PrivateShieldedTRC20Parameters mintParams(String privKey,
       long value, String contractAddr, byte[] rcm)
       throws ZksnarkException, ContractValidateException {
-    librustzcashInitZksnarkParams();
     long fromAmount = value;
     SpendingKey sk = SpendingKey.decode(privKey);
     ExpandedSpendingKey expsk = sk.expandedSpendingKey();

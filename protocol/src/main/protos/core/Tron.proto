@@ -6,7 +6,6 @@ import "core/contract/common.proto";
 
 package protocol;
 
-
 option java_package = "org.tron.protos"; //Specify the name of the package that generated the Java file
 option java_outer_classname = "Protocol"; //Specify the class name of the generated Java file
 option go_package = "github.com/tronprotocol/grpc-gateway/core";
@@ -132,7 +131,7 @@ message ChainParameters {
 message Account {
   /* frozen balance */
   message Frozen {
-    int64 frozen_balance = 1; // the frozen trx balance
+    int64 frozen_balance = 1; // the frozen trx or asset balance
     int64 expire_time = 2; // the expire time
   }
   // account nick name
@@ -193,6 +192,7 @@ message Account {
   bytes account_id = 23;
 
   int64 net_window_size = 24;
+  bool net_window_optimized = 25;
 
   message AccountResource {
     // energy resource, get from frozen
@@ -215,6 +215,7 @@ message Account {
 
     int64 delegated_frozenV2_balance_for_energy = 10;
     int64 acquired_delegated_frozenV2_balance_for_energy = 11;
+    bool energy_window_optimized = 12;
   }
   AccountResource account_resource = 26;
   bytes codeHash = 30;
@@ -405,6 +406,7 @@ message Transaction {
       UNKNOWN = 13;
       TRANSFER_FAILED = 14;
       INVALID_CODE = 15;
+      // please fill in the order according to the serial number
     }
     int64 fee = 1;
     code ret = 2;
@@ -423,7 +425,7 @@ message Transaction {
     bytes orderId = 25;
     repeated MarketOrderDetail orderDetails = 26;
     int64 withdraw_expire_amount = 27;
-    int64 cancel_all_unfreezeV2_amount = 28;
+    map<string, int64> cancel_unfreezeV2_amount = 28;
   }
 
   message raw {
@@ -484,7 +486,7 @@ message TransactionInfo {
   int64 packingFee = 27;
 
   int64 withdraw_expire_amount = 28;
-  int64 cancel_all_unfreezeV2_amount = 29;
+  map<string, int64> cancel_unfreezeV2_amount = 29;
 }
 
 message TransactionRet {
@@ -598,7 +600,9 @@ enum ReasonCode {
   CONNECT_FAIL = 0x21;
   TOO_MANY_PEERS_WITH_SAME_IP = 0x22;
   LIGHT_NODE_SYNC_FAIL = 0x23;
-  BELOW_THAN_ME = 0X24;
+  BELOW_THAN_ME = 0x24;
+  NOT_WITNESS = 0x25;
+  NO_SUCH_MESSAGE = 0x26;
   UNKNOWN = 0xFF;
 }
 
@@ -622,6 +626,7 @@ message HelloMessage {
   bytes signature = 8;
   int32 nodeType = 9;
   int64 lowestBlockNum = 10;
+  bytes codeVersion = 11;
 }
 
 message InternalTransaction {

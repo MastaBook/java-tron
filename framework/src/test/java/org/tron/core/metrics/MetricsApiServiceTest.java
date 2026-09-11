@@ -1,64 +1,47 @@
 package org.tron.core.metrics;
 
-import java.io.File;
 import lombok.extern.slf4j.Slf4j;
-import org.junit.After;
 import org.junit.Assert;
-import org.junit.Before;
 import org.junit.Test;
-import org.tron.common.application.Application;
-import org.tron.common.application.ApplicationFactory;
-import org.tron.common.application.TronApplicationContext;
+import org.tron.common.BaseMethodTest;
 import org.tron.common.parameter.CommonParameter;
-import org.tron.common.utils.FileUtil;
-import org.tron.core.Constant;
-import org.tron.core.config.DefaultConfig;
 import org.tron.core.config.args.Args;
 import org.tron.core.services.RpcApiService;
 import org.tron.program.Version;
 import org.tron.protos.Protocol;
 
 @Slf4j
-public class MetricsApiServiceTest {
+public class MetricsApiServiceTest extends BaseMethodTest {
 
-  private static String dbPath = "output-metrics";
   private static String dbDirectory = "metrics-database";
-  private static String indexDirectory = "metrics-index";
   private static int port = 10001;
-  private TronApplicationContext context;
   private MetricsApiService metricsApiService;
   private RpcApiService rpcApiService;
-  private Application appT;
 
+  @Override
+  protected String[] extraArgs() {
+    return new String[]{
+        "--storage-db-directory", dbDirectory,
+        "--debug"
+    };
+  }
 
-  @Before
-  public void init() {
-    Args.setParam(new String[]{"--output-directory", dbPath, "--debug"},
-        Constant.TEST_CONF);
-    Args.setParam(
-        new String[]{
-            "--output-directory", dbPath,
-            "--storage-db-directory", dbDirectory,
-            "--storage-index-directory", indexDirectory
-        },
-        "config.conf"
-    );
+  @Override
+  protected void afterInit() {
     CommonParameter parameter = Args.getInstance();
     parameter.setNodeListenPort(port);
     parameter.getSeedNode().getAddressList().clear();
     parameter.setNodeExternalIp("127.0.0.1");
-    context = new TronApplicationContext(DefaultConfig.class);
-    appT = ApplicationFactory.create(context);
-    rpcApiService = context.getBean(RpcApiService.class);
     metricsApiService = context.getBean(MetricsApiService.class);
-    appT.addService(rpcApiService);
-    appT.initServices(parameter);
-    appT.startServices();
     appT.startup();
   }
 
   @Test
   public void testProcessMessage() {
+    MetricsUtil.getMeter(MetricsKey.NET_TCP_IN_TRAFFIC).mark(1000);
+    MetricsUtil.getMeter(MetricsKey.NET_TCP_OUT_TRAFFIC).mark(2000);
+    MetricsUtil.getMeter(MetricsKey.NET_UDP_IN_TRAFFIC).mark(4000);
+    MetricsUtil.getMeter(MetricsKey.NET_UDP_OUT_TRAFFIC).mark(8000);
 
     MetricsInfo m1 = metricsApiService.getMetricsInfo();
 
@@ -100,11 +83,20 @@ public class MetricsApiServiceTest {
     Assert.assertEquals(m1.getNet().getErrorProtoCount(), m2.getNet().getErrorProtoCount());
     Assert
         .assertEquals(m1.getNet().getValidConnectionCount(), m2.getNet().getValidConnectionCount());
+
+    long tcpIn = m1.getNet().getTcpInTraffic().getCount();
+    long tcpOut = m1.getNet().getTcpOutTraffic().getCount();
+    long udpIn = m1.getNet().getUdpInTraffic().getCount();
+    long udpOut = m1.getNet().getUdpOutTraffic().getCount();
+
+    Assert.assertNotEquals(tcpOut, udpIn);
+    Assert.assertNotEquals(tcpIn, tcpOut);
+    Assert.assertNotEquals(udpIn, udpOut);
+
+    Assert.assertEquals(tcpIn, m2.getNet().getTcpInTraffic().getCount());
+    Assert.assertEquals(tcpOut, m2.getNet().getTcpOutTraffic().getCount());
+    Assert.assertEquals(udpIn, m2.getNet().getUdpInTraffic().getCount());
+    Assert.assertEquals(udpOut, m2.getNet().getUdpOutTraffic().getCount());
   }
 
-  @After
-  public void destroy() {
-    context.destroy();
-    FileUtil.deleteDir(new File(dbPath));
-  }
 }

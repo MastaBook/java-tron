@@ -22,7 +22,16 @@ public class Parameter {
     VERSION_4_6(25, 1596780000000L, 80),
     VERSION_4_7(26, 1596780000000L, 80),
     VERSION_4_7_1(27, 1596780000000L, 80),
-    VERSION_4_7_2(28, 1596780000000L, 80);
+    VERSION_4_7_2(28, 1596780000000L, 80),
+    VERSION_4_7_4(29, 1596780000000L, 80),
+    VERSION_4_7_5(30, 1596780000000L, 80),
+    VERSION_4_7_7(31, 1596780000000L, 80),
+    VERSION_4_8_0(32, 1596780000000L, 80),
+    VERSION_4_8_0_1(33, 1596780000000L, 70),
+    VERSION_4_8_1(34, 1596780000000L, 80),
+    VERSION_4_8_1_1(35, 1596780000000L, 70),
+    VERSION_4_8_2(36, 1596780000000L, 80),
+    VERSION_4_8_2_2(37, 1596780000000L, 70);
     // if add a version, modify BLOCK_VERSION simultaneously
 
     @Getter
@@ -71,11 +80,13 @@ public class Parameter {
     public static final int SINGLE_REPEAT = 1;
     public static final int BLOCK_FILLED_SLOTS_NUMBER = 128;
     public static final int MAX_FROZEN_NUMBER = 1;
-    public static final int BLOCK_VERSION = 28;
+    public static final int BLOCK_VERSION = 37;
     public static final long FROZEN_PERIOD = 86_400_000L;
     public static final long DELEGATE_PERIOD = 3 * 86_400_000L;
     public static final long TRX_PRECISION = 1000_000L;
     public static final long DELEGATE_COST_BASE_SIZE = 275L;
+    public static final long WINDOW_SIZE_PRECISION = 1000L;
+    public static final long ONE_YEAR_BLOCK_NUMBERS = 10512000L;
   }
 
   public class NodeConstant {
@@ -93,6 +104,7 @@ public class Parameter {
     public static final int MSG_CACHE_DURATION_IN_BLOCKS = 5;
     public static final int MAX_BLOCK_FETCH_PER_PEER = 100;
     public static final int MAX_TRX_FETCH_PER_PEER = 1000;
+    public static final int MAX_SYNC_CHAIN_IDS = 30;
   }
 
   public class DatabaseConstants {
@@ -101,6 +113,7 @@ public class Parameter {
     public static final int PROPOSAL_COUNT_LIMIT_MAX = 1000;
     public static final int EXCHANGE_COUNT_LIMIT_MAX = 1000;
     public static final int MARKET_COUNT_LIMIT_MAX = 1000;
+    public static final int WITNESS_COUNT_LIMIT_MAX = 1000;
   }
 
   public class AdaptiveResourceLimitConstants {

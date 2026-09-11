@@ -1,8 +1,10 @@
 package org.tron.core.db;
 
+import static org.tron.core.Constant.PER_SIGN_LENGTH;
 import static org.tron.core.config.Parameter.ChainConstant.TRX_PRECISION;
 import static org.tron.protos.Protocol.Transaction.Contract.ContractType.ShieldedTransferContract;
 import static org.tron.protos.Protocol.Transaction.Contract.ContractType.TransferAssetContract;
+import static org.tron.protos.contract.Common.ResourceCode.BANDWIDTH;
 
 import com.google.protobuf.ByteString;
 import java.util.HashMap;
@@ -19,12 +21,11 @@ import org.tron.core.capsule.AssetIssueCapsule;
 import org.tron.core.capsule.TransactionCapsule;
 import org.tron.core.exception.AccountResourceInsufficientException;
 import org.tron.core.exception.ContractValidateException;
+import org.tron.core.exception.TooBigTransactionException;
 import org.tron.core.exception.TooBigTransactionResultException;
 import org.tron.protos.Protocol.Transaction.Contract;
 import org.tron.protos.contract.AssetIssueContractOuterClass.TransferAssetContract;
 import org.tron.protos.contract.BalanceContract.TransferContract;
-
-import static org.tron.protos.contract.Common.ResourceCode.BANDWIDTH;
 
 @Slf4j(topic = "DB")
 public class BandwidthProcessor extends ResourceProcessor {
@@ -95,8 +96,17 @@ public class BandwidthProcessor extends ResourceProcessor {
   @Override
   public void consume(TransactionCapsule trx, TransactionTrace trace)
       throws ContractValidateException, AccountResourceInsufficientException,
-      TooBigTransactionResultException {
+      TooBigTransactionResultException, TooBigTransactionException {
     List<Contract> contracts = trx.getInstance().getRawData().getContractList();
+    long resultSizeWithMaxContractRet = trx.getResultSizeWithMaxContractRet();
+    boolean optimizeTxs = !trx.isInBlock() || chainBaseManager
+        .getDynamicPropertiesStore().allowConsensusLogicOptimization();
+    if (!trx.isInBlock() && resultSizeWithMaxContractRet >
+        Constant.MAX_RESULT_SIZE_IN_TX * contracts.size()) {
+      throw new TooBigTransactionResultException(String.format(
+          "Too big transaction result, TxId %s, the result size is %d bytes, maxResultSize %d",
+          trx.getTransactionId(), resultSizeWithMaxContractRet, Constant.MAX_RESULT_SIZE_IN_TX));
+    }
     if (trx.getResultSerializedSize() > Constant.MAX_RESULT_SIZE_IN_TX * contracts.size()) {
       throw new TooBigTransactionResultException();
     }
@@ -127,6 +137,17 @@ public class BandwidthProcessor extends ResourceProcessor {
       }
       long now = chainBaseManager.getHeadSlot();
       if (contractCreateNewAccount(contract)) {
+        if (optimizeTxs) {
+          long maxCreateAccountTxSize = dynamicPropertiesStore.getMaxCreateAccountTxSize();
+          int signatureCount = trx.getInstance().getSignatureCount();
+          long createAccountBytesSize = trx.getInstance().toBuilder().clearRet()
+              .build().getSerializedSize() - (signatureCount * PER_SIGN_LENGTH);
+          if (createAccountBytesSize > maxCreateAccountTxSize) {
+            throw new TooBigTransactionException(String.format(
+                "Too big new account transaction, TxId %s, the size is %d bytes, maxTxSize %d",
+                trx.getTransactionId(), createAccountBytesSize, maxCreateAccountTxSize));
+          }
+        }
         consumeForCreateNewAccount(accountCapsule, bytesSize, now, trace);
         continue;
       }
@@ -416,7 +437,6 @@ public class BandwidthProcessor extends ResourceProcessor {
     if (frozeBalance < TRX_PRECISION) {
       return 0;
     }
-    long netWeight = frozeBalance / TRX_PRECISION;
     long totalNetLimit = chainBaseManager.getDynamicPropertiesStore().getTotalNetLimit();
     long totalNetWeight = chainBaseManager.getDynamicPropertiesStore().getTotalNetWeight();
     if (dynamicPropertiesStore.allowNewReward() && totalNetWeight <= 0) {
@@ -425,16 +445,23 @@ public class BandwidthProcessor extends ResourceProcessor {
     if (totalNetWeight == 0) {
       return 0;
     }
+    if (hardenCalculation()) {
+      return calculateGlobalLimitV1(frozeBalance, totalNetLimit, totalNetWeight);
+    }
+    long netWeight = frozeBalance / TRX_PRECISION;
     return (long) (netWeight * ((double) totalNetLimit / totalNetWeight));
   }
 
   public long calculateGlobalNetLimitV2(long frozeBalance) {
-    double netWeight = (double) frozeBalance / TRX_PRECISION;
     long totalNetLimit = dynamicPropertiesStore.getTotalNetLimit();
     long totalNetWeight = dynamicPropertiesStore.getTotalNetWeight();
     if (totalNetWeight == 0) {
       return 0;
     }
+    if (hardenCalculation()) {
+      return calculateGlobalLimitV2(frozeBalance, totalNetLimit, totalNetWeight);
+    }
+    double netWeight = (double) frozeBalance / TRX_PRECISION;
     return (long) (netWeight * ((double) totalNetLimit / totalNetWeight));
   }
 

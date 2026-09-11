@@ -2,6 +2,7 @@ package org.tron.core.vm;
 
 import static java.lang.String.format;
 import static org.apache.commons.codec.binary.Base64.encodeBase64String;
+import static org.tron.common.math.Maths.addExact;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -12,7 +13,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.Arrays;
-import java.util.Map;
 import java.util.zip.Deflater;
 import java.util.zip.DeflaterOutputStream;
 import lombok.extern.slf4j.Slf4j;
@@ -20,6 +20,7 @@ import org.tron.common.utils.ByteArray;
 import org.tron.common.utils.ByteUtil;
 import org.tron.common.utils.Commons;
 import org.tron.common.utils.DecodeUtil;
+import org.tron.core.Constant;
 import org.tron.core.capsule.AccountCapsule;
 import org.tron.core.exception.ContractValidateException;
 import org.tron.core.vm.config.VMConfig;
@@ -31,6 +32,11 @@ public final class VMUtils {
   private static final int BUF_SIZE = 4096;
 
   private VMUtils() {
+  }
+
+  public static int getAddressSize() {
+    return VMConfig.allowEnergyAdjustment() ?
+        Constant.TRON_ADDRESS_SIZE : Constant.STANDARD_ADDRESS_SIZE;
   }
 
   public static void closeQuietly(Closeable closeable) {
@@ -164,7 +170,7 @@ public final class VMUtils {
             "Validate InternalTransfer error, balance is not sufficient.");
       }
 
-      Math.addExact(toAccount.getBalance(), amount);
+      addExact(toAccount.getBalance(), amount, VMConfig.disableJavaLangMath());
     } catch (ArithmeticException e) {
       logger.debug(e.getMessage(), e);
       throw new ContractValidateException(e.getMessage());
@@ -225,7 +231,8 @@ public final class VMUtils {
               ByteArray.toStr(tokenIdWithoutLeadingZero));
       if (assetBalance != null) {
         try {
-          assetBalance = Math.addExact(assetBalance, amount); //check if overflow
+          addExact(assetBalance, amount,
+              VMConfig.disableJavaLangMath()); //check if overflow
         } catch (Exception e) {
           logger.debug(e.getMessage(), e);
           throw new ContractValidateException(e.getMessage());

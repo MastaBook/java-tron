@@ -7,8 +7,7 @@ import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.tron.common.BaseTest;
-import org.tron.common.application.Application;
-import org.tron.core.Constant;
+import org.tron.common.TestConstants;
 import org.tron.core.Wallet;
 import org.tron.core.capsule.BytesCapsule;
 import org.tron.core.config.args.Args;
@@ -21,17 +20,14 @@ public class NullifierStoreTest extends BaseTest {
   private static final byte[] TRX_TWO = randomBytes(32);
   private static final byte[] TRX_TWO_NEW = randomBytes(32);
   @Resource
-  public Application AppT;
-  @Resource
   private NullifierStore nullifierStore;
   private static BytesCapsule nullifier1;
   private static BytesCapsule nullifier2;
   private static BytesCapsule nullifier2New;
 
   static {
-    dbPath = "output_NullifierStore_test";
-    Args.setParam(new String[]{"--output-directory", dbPath},
-        Constant.TEST_CONF);
+    Args.setParam(new String[]{"--output-directory", dbPath()},
+        TestConstants.TEST_CONF);
   }
 
   @BeforeClass

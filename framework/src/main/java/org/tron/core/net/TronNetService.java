@@ -15,6 +15,7 @@ import org.springframework.stereotype.Component;
 import org.tron.common.overlay.message.Message;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.core.config.args.Args;
+import org.tron.core.exception.TronError;
 import org.tron.core.net.message.adv.TransactionMessage;
 import org.tron.core.net.messagehandler.TransactionsMsgHandler;
 import org.tron.core.net.peer.PeerConnection;
@@ -22,6 +23,7 @@ import org.tron.core.net.peer.PeerManager;
 import org.tron.core.net.peer.PeerStatusCheck;
 import org.tron.core.net.service.adv.AdvService;
 import org.tron.core.net.service.effective.EffectiveCheckService;
+import org.tron.core.net.service.effective.ResilienceService;
 import org.tron.core.net.service.fetchblock.FetchBlockService;
 import org.tron.core.net.service.nodepersist.NodePersistService;
 import org.tron.core.net.service.relay.RelayService;
@@ -49,6 +51,9 @@ public class TronNetService {
 
   @Autowired
   private PeerStatusCheck peerStatusCheck;
+
+  @Autowired
+  private ResilienceService resilienceService;
 
   @Autowired
   private TransactionsMsgHandler transactionsMsgHandler;
@@ -88,6 +93,7 @@ public class TronNetService {
       advService.init();
       syncService.init();
       peerStatusCheck.init();
+      resilienceService.init();
       transactionsMsgHandler.init();
       fetchBlockService.init();
       nodePersistService.init();
@@ -97,7 +103,7 @@ public class TronNetService {
       effectiveCheckService.init();
       logger.info("Net service start successfully");
     } catch (Exception e) {
-      logger.error("Net service start failed", e);
+      throw new TronError(e, TronError.ErrCode.TRON_NET_SERVICE_INIT);
     }
   }
 
@@ -110,6 +116,7 @@ public class TronNetService {
     nodePersistService.close();
     advService.close();
     syncService.close();
+    resilienceService.close();
     peerStatusCheck.close();
     transactionsMsgHandler.close();
     fetchBlockService.close();
@@ -148,7 +155,7 @@ public class TronNetService {
   }
 
   private P2pConfig getConfig() {
-    P2pConfig config = new P2pConfig();
+    P2pConfig config = parameter.getP2pConfig();
     return updateConfig(config);
   }
 
@@ -177,7 +184,7 @@ public class TronNetService {
     config.setMaxConnectionsWithSameIp(parameter.getMaxConnectionsWithSameIp());
     config.setPort(parameter.getNodeListenPort());
     config.setNetworkId(parameter.getNodeP2pVersion());
-    config.setDisconnectionPolicyEnable(parameter.isOpenFullTcpDisconnect());
+    config.setDisconnectionPolicyEnable(false);
     config.setNodeDetectEnable(parameter.isNodeDetectEnable());
     config.setDiscoverEnable(parameter.isNodeDiscoveryEnable());
     if (StringUtils.isEmpty(config.getIp()) && hasIpv4Stack(NetUtil.getAllLocalAddress())) {

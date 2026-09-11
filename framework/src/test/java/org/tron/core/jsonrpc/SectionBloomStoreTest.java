@@ -4,15 +4,17 @@ import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import javax.annotation.Resource;
+import org.junit.After;
 import org.junit.Assert;
+import org.junit.Before;
 import org.junit.Test;
 import org.tron.common.BaseTest;
+import org.tron.common.TestConstants;
+import org.tron.common.es.ExecutorServiceManager;
 import org.tron.common.runtime.vm.DataWord;
 import org.tron.common.runtime.vm.LogInfo;
 import org.tron.common.utils.ByteArray;
-import org.tron.core.Constant;
 import org.tron.core.capsule.TransactionRetCapsule;
 import org.tron.core.config.args.Args;
 import org.tron.core.exception.EventBloomException;
@@ -28,9 +30,20 @@ public class SectionBloomStoreTest extends BaseTest {
   @Resource
   SectionBloomStore sectionBloomStore;
 
+  private ExecutorService sectionExecutor;
+
   static {
-    dbPath = "output-sectionBloomStore-test";
-    Args.setParam(new String[] {"--output-directory", dbPath}, Constant.TEST_CONF);
+    Args.setParam(new String[] {"--output-directory", dbPath()}, TestConstants.TEST_CONF);
+  }
+
+  @Before
+  public void setUp() {
+    sectionExecutor = ExecutorServiceManager.newFixedThreadPool("section-bloom-query", 5);
+  }
+
+  @After
+  public void tearDown() {
+    ExecutorServiceManager.shutdownAndAwaitTermination(sectionExecutor, "section-bloom-query");
   }
 
   @Test
@@ -127,13 +140,12 @@ public class SectionBloomStoreTest extends BaseTest {
     }
 
     long currentMaxBlockNum = 50000;
-    ExecutorService sectionExecutor = Executors.newFixedThreadPool(5);
 
     //query one address
     try {
       LogFilterWrapper logFilterWrapper = new LogFilterWrapper(
           new FilterRequest("earliest", "latest", ByteArray.toJsonHex(address1), null, null),
-          currentMaxBlockNum, null);
+          currentMaxBlockNum, null, false);
       LogBlockQuery logBlockQuery =
           new LogBlockQuery(logFilterWrapper, sectionBloomStore, currentMaxBlockNum,
               sectionExecutor);
@@ -150,7 +162,7 @@ public class SectionBloomStoreTest extends BaseTest {
     try {
       LogFilterWrapper logFilterWrapper = new LogFilterWrapper(
           new FilterRequest("earliest", "latest", addressList, null, null),
-          currentMaxBlockNum, null);
+          currentMaxBlockNum, null, false);
       LogBlockQuery logBlockQuery =
           new LogBlockQuery(logFilterWrapper, sectionBloomStore, currentMaxBlockNum,
               sectionExecutor);
@@ -166,7 +178,7 @@ public class SectionBloomStoreTest extends BaseTest {
       LogFilterWrapper logFilterWrapper = new LogFilterWrapper(
           new FilterRequest("earliest", "latest", null,
               new String[] {ByteArray.toHexString(topic1)}, null),
-          currentMaxBlockNum, null);
+          currentMaxBlockNum, null, false);
       LogBlockQuery logBlockQuery =
           new LogBlockQuery(logFilterWrapper, sectionBloomStore, currentMaxBlockNum,
               sectionExecutor);
@@ -182,7 +194,7 @@ public class SectionBloomStoreTest extends BaseTest {
       LogFilterWrapper logFilterWrapper = new LogFilterWrapper(
           new FilterRequest("earliest", "latest", null,
               new String[] {ByteArray.toHexString(topic2)}, null),
-          currentMaxBlockNum, null);
+          currentMaxBlockNum, null, false);
       LogBlockQuery logBlockQuery =
           new LogBlockQuery(logFilterWrapper, sectionBloomStore, currentMaxBlockNum,
               sectionExecutor);
@@ -200,7 +212,7 @@ public class SectionBloomStoreTest extends BaseTest {
       LogFilterWrapper logFilterWrapper = new LogFilterWrapper(
           new FilterRequest("earliest", "latest", null,
               new Object[] {topicList}, null),
-          currentMaxBlockNum, null);
+          currentMaxBlockNum, null, false);
       LogBlockQuery logBlockQuery =
           new LogBlockQuery(logFilterWrapper, sectionBloomStore, currentMaxBlockNum,
               sectionExecutor);
@@ -227,7 +239,7 @@ public class SectionBloomStoreTest extends BaseTest {
       LogFilterWrapper logFilterWrapper = new LogFilterWrapper(
           new FilterRequest("earliest", "latest", null,
               new Object[] {ByteArray.toJsonHex(topic1), ByteArray.toJsonHex(topic2)}, null),
-          currentMaxBlockNum, null);
+          currentMaxBlockNum, null, false);
       LogBlockQuery logBlockQuery =
           new LogBlockQuery(logFilterWrapper, sectionBloomStore, currentMaxBlockNum,
               sectionExecutor);
@@ -236,5 +248,6 @@ public class SectionBloomStoreTest extends BaseTest {
     } catch (Exception e) {
       Assert.fail();
     }
+
   }
 }

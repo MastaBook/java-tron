@@ -1,5 +1,6 @@
 package org.tron.common.utils;
 
+import static org.tron.common.math.Maths.ceil;
 import static org.tron.common.utils.StringUtil.encode58Check;
 
 import com.google.common.collect.Maps;
@@ -78,7 +79,7 @@ public class ForkController {
   private boolean passNew(int version) {
     ForkBlockVersionEnum versionEnum = ForkBlockVersionEnum.getForkBlockVersionEnum(version);
     if (versionEnum == null) {
-      logger.error("Not exist block version: {}.", version);
+      logger.warn("Not exist block version: {}.", version);
       return false;
     }
     long latestBlockTime = manager.getDynamicPropertiesStore().getLatestBlockHeaderTimestamp();
@@ -98,8 +99,8 @@ public class ForkController {
         ++count;
       }
     }
-    return count >= Math
-        .ceil((double) versionEnum.getHardForkRate() * stats.length / 100);
+    return count >= ceil((double) versionEnum.getHardForkRate() * stats.length / 100,
+        manager.getDynamicPropertiesStore().disableJavaLangMath());
   }
 
 

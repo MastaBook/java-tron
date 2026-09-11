@@ -1,15 +1,18 @@
 package org.tron.core.db;
 
+import static org.tron.common.math.Maths.random;
+import static org.tron.common.math.Maths.round;
+
 import java.util.List;
 import lombok.extern.slf4j.Slf4j;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Test;
 import org.tron.common.BaseTest;
+import org.tron.common.TestConstants;
 import org.tron.common.utils.ByteArray;
 import org.tron.common.utils.ByteUtil;
 import org.tron.core.ChainBaseManager;
-import org.tron.core.Constant;
 import org.tron.core.capsule.MarketOrderIdListCapsule;
 import org.tron.core.capsule.utils.MarketUtils;
 import org.tron.core.config.args.Args;
@@ -23,8 +26,7 @@ import org.tron.protos.Protocol.MarketPrice;
 public class MarketPairPriceToOrderStoreTest extends BaseTest {
 
   static {
-    dbPath = "output-MarketPairPriceToOrderStore-test";
-    Args.setParam(new String[]{"-d", dbPath}, Constant.TEST_CONF);
+    Args.setParam(new String[]{"-d", dbPath()}, TestConstants.TEST_CONF);
   }
 
   @After
@@ -44,7 +46,7 @@ public class MarketPairPriceToOrderStoreTest extends BaseTest {
   }
 
   private static int randomInt(int minInt, int maxInt) {
-    return (int) Math.round(Math.random() * (maxInt - minInt) + minInt);
+    return (int) round(random(true) * (maxInt - minInt) + minInt, true);
   }
 
   @Test

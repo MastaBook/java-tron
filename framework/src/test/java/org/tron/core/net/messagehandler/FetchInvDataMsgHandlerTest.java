@@ -1,5 +1,207 @@
 package org.tron.core.net.messagehandler;
 
+import static org.tron.core.net.message.MessageTypes.FETCH_INV_DATA;
+
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
+import java.lang.reflect.Field;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+import org.junit.Assert;
+import org.junit.Test;
+import org.mockito.Mockito;
+import org.tron.common.utils.ReflectUtils;
+import org.tron.common.utils.Sha256Hash;
+import org.tron.core.capsule.BlockCapsule;
+import org.tron.core.config.Parameter;
+import org.tron.core.exception.P2pException;
+import org.tron.core.net.P2pRateLimiter;
+import org.tron.core.net.TronNetDelegate;
+import org.tron.core.net.message.adv.BlockMessage;
+import org.tron.core.net.message.adv.FetchInvDataMessage;
+import org.tron.core.net.peer.Item;
+import org.tron.core.net.peer.PeerConnection;
+import org.tron.core.net.service.adv.AdvService;
+import org.tron.protos.Protocol;
+
 public class FetchInvDataMsgHandlerTest {
 
+  @Test
+  public void testProcessMessage() throws Exception {
+    FetchInvDataMsgHandler fetchInvDataMsgHandler = new FetchInvDataMsgHandler();
+    PeerConnection peer = Mockito.mock(PeerConnection.class);
+    TronNetDelegate tronNetDelegate = Mockito.mock(TronNetDelegate.class);
+    AdvService advService = Mockito.mock(AdvService.class);
+
+    Field field = FetchInvDataMsgHandler.class.getDeclaredField("tronNetDelegate");
+    field.setAccessible(true);
+    field.set(fetchInvDataMsgHandler, tronNetDelegate);
+
+    Mockito.when(tronNetDelegate.allowPBFT()).thenReturn(false);
+
+    BlockCapsule.BlockId blockId = new BlockCapsule.BlockId();
+    List<Sha256Hash> blockIds = new LinkedList<>();
+    blockIds.add(blockId);
+
+    Cache<Item, Long> advInvSpread = CacheBuilder.newBuilder().maximumSize(20000)
+        .expireAfterWrite(1, TimeUnit.HOURS).recordStats().build();
+    Mockito.when(peer.getAdvInvSpread()).thenReturn(advInvSpread);
+    Mockito.when(peer.isNeedSyncFromUs()).thenReturn(true);
+    Mockito.when(peer.isSyncFinish()).thenReturn(false);
+    Mockito.when(peer.getBlockBothHave()).thenReturn(blockId);
+    Cache<Sha256Hash, Long> syncBlockIdCache = CacheBuilder.newBuilder()
+        .maximumSize(2 * Parameter.NetConstants.SYNC_FETCH_BATCH_NUM).recordStats().build();
+    Mockito.when(peer.getSyncBlockIdCache()).thenReturn(syncBlockIdCache);
+    Mockito.when(peer.getLastSyncBlockId()).thenReturn(blockId);
+    BlockCapsule blockCapsule = new BlockCapsule(1, Sha256Hash.ZERO_HASH,
+        System.currentTimeMillis(), Sha256Hash.ZERO_HASH.getByteString());
+    Mockito.when(advService.getMessage(new Item(blockId, Protocol.Inventory.InventoryType.BLOCK)))
+        .thenReturn(new BlockMessage(blockCapsule));
+    ReflectUtils.setFieldValue(fetchInvDataMsgHandler, "advService", advService);
+    P2pRateLimiter p2pRateLimiter = new P2pRateLimiter();
+    p2pRateLimiter.register(FETCH_INV_DATA.asByte(), 2);
+    Mockito.when(peer.getP2pRateLimiter()).thenReturn(p2pRateLimiter);
+
+    fetchInvDataMsgHandler.processMessage(peer,
+        new FetchInvDataMessage(blockIds, Protocol.Inventory.InventoryType.BLOCK));
+    Assert.assertNotNull(syncBlockIdCache.getIfPresent(blockId));
+  }
+
+  @Test
+  public void testIsAdvInv() {
+    FetchInvDataMsgHandler fetchInvDataMsgHandler = new FetchInvDataMsgHandler();
+
+    List<Sha256Hash> list = new LinkedList<>();
+    list.add(Sha256Hash.ZERO_HASH);
+    FetchInvDataMessage msg =
+        new FetchInvDataMessage(list, Protocol.Inventory.InventoryType.TRX);
+
+    boolean isAdv = fetchInvDataMsgHandler.isAdvInv(null, msg);
+    Assert.assertTrue(isAdv);
+
+    PeerConnection peer = Mockito.mock(PeerConnection.class);
+    Cache<Item, Long> advInvSpread = CacheBuilder.newBuilder().build();
+    Mockito.when(peer.getAdvInvSpread()).thenReturn(advInvSpread);
+
+    msg = new FetchInvDataMessage(list, Protocol.Inventory.InventoryType.BLOCK);
+    isAdv = fetchInvDataMsgHandler.isAdvInv(peer, msg);
+    Assert.assertTrue(!isAdv);
+
+    advInvSpread.put(new Item(Sha256Hash.ZERO_HASH, Protocol.Inventory.InventoryType.BLOCK), 1L);
+    isAdv = fetchInvDataMsgHandler.isAdvInv(peer, msg);
+    Assert.assertTrue(isAdv);
+  }
+
+  @Test
+  public void testSyncFetchCheck() {
+    BlockCapsule.BlockId blockId = new BlockCapsule.BlockId(Sha256Hash.ZERO_HASH, 10000L);
+    List<Sha256Hash> blockIds = new LinkedList<>();
+    blockIds.add(blockId);
+    FetchInvDataMessage msg =
+        new FetchInvDataMessage(blockIds, Protocol.Inventory.InventoryType.BLOCK);
+
+    PeerConnection peer = Mockito.mock(PeerConnection.class);
+    Mockito.when(peer.isNeedSyncFromUs()).thenReturn(true);
+    Cache<Item, Long> advInvSpread = CacheBuilder.newBuilder().maximumSize(100)
+        .expireAfterWrite(1, TimeUnit.HOURS).recordStats().build();
+    Mockito.when(peer.getAdvInvSpread()).thenReturn(advInvSpread);
+    P2pRateLimiter p2pRateLimiter = new P2pRateLimiter();
+    p2pRateLimiter.register(FETCH_INV_DATA.asByte(), 2);
+    Mockito.when(peer.getP2pRateLimiter()).thenReturn(p2pRateLimiter);
+
+    FetchInvDataMsgHandler fetchInvDataMsgHandler = new FetchInvDataMsgHandler();
+
+    Mockito.when(peer.getLastSyncBlockId())
+        .thenReturn(new BlockCapsule.BlockId(Sha256Hash.ZERO_HASH, 1000L));
+    Exception e1 = Assert.assertThrows(Exception.class,
+        () -> fetchInvDataMsgHandler.processMessage(peer, msg));
+    Assert.assertEquals("maxBlockNum: 1000, blockNum: 10000", e1.getMessage());
+
+    Mockito.when(peer.getLastSyncBlockId())
+        .thenReturn(new BlockCapsule.BlockId(Sha256Hash.ZERO_HASH, 20000L));
+    Exception e2 = Assert.assertThrows(Exception.class,
+        () -> fetchInvDataMsgHandler.processMessage(peer, msg));
+    Assert.assertEquals("minBlockNum: 16000, blockNum: 10000", e2.getMessage());
+  }
+
+  @Test
+  public void testDuplicateHashRejected() throws Exception {
+    FetchInvDataMsgHandler handler = new FetchInvDataMsgHandler();
+    PeerConnection peer = Mockito.mock(PeerConnection.class);
+    AdvService advService = Mockito.mock(AdvService.class);
+    TronNetDelegate tronNetDelegate = Mockito.mock(TronNetDelegate.class);
+
+    ReflectUtils.setFieldValue(handler, "advService", advService);
+    ReflectUtils.setFieldValue(handler, "tronNetDelegate", tronNetDelegate);
+
+    Sha256Hash hash = Sha256Hash.ZERO_HASH;
+    List<Sha256Hash> hashList = new LinkedList<>();
+    hashList.add(hash);
+    hashList.add(hash); // duplicate
+
+    FetchInvDataMessage msg = new FetchInvDataMessage(hashList,
+        Protocol.Inventory.InventoryType.TRX);
+
+    Cache<Item, Long> advInvSpread = CacheBuilder.newBuilder()
+        .maximumSize(20000).expireAfterWrite(1, TimeUnit.HOURS).build();
+    advInvSpread.put(new Item(hash, Protocol.Inventory.InventoryType.TRX), 1L);
+    Mockito.when(peer.getAdvInvSpread()).thenReturn(advInvSpread);
+
+    try {
+      handler.processMessage(peer, msg);
+      Assert.fail("Expected P2pException for duplicate hash");
+    } catch (P2pException e) {
+      Assert.assertEquals(P2pException.TypeEnum.BAD_MESSAGE, e.getType());
+    }
+  }
+
+  @Test
+  public void testUnknownInventoryTypeRejected() throws Exception {
+    FetchInvDataMsgHandler handler = new FetchInvDataMsgHandler();
+    PeerConnection peer = Mockito.mock(PeerConnection.class);
+
+    // craft a FetchInvData whose enum type holds an undefined value (2)
+    Protocol.Inventory inv = Protocol.Inventory.newBuilder()
+        .setTypeValue(2)
+        .addIds(com.google.protobuf.ByteString.copyFrom(new byte[32]))
+        .build();
+    FetchInvDataMessage msg = new FetchInvDataMessage(inv.toByteArray());
+    Assert.assertEquals(Protocol.Inventory.InventoryType.UNRECOGNIZED, msg.getInventoryType());
+
+    try {
+      handler.processMessage(peer, msg);
+      Assert.fail("Expected P2pException for unknown inventory type");
+    } catch (P2pException e) {
+      Assert.assertEquals(P2pException.TypeEnum.BAD_MESSAGE, e.getType());
+    }
+  }
+
+  @Test
+  public void testRateLimiter() {
+    List<Sha256Hash> blockIds = new LinkedList<>();
+    for (int i = 0; i <= 100; i++) {
+      blockIds.add(new BlockCapsule.BlockId(Sha256Hash.ZERO_HASH, (long) i));
+    }
+    FetchInvDataMessage msg =
+        new FetchInvDataMessage(blockIds, Protocol.Inventory.InventoryType.BLOCK);
+    PeerConnection peer = Mockito.mock(PeerConnection.class);
+    Mockito.when(peer.isNeedSyncFromUs()).thenReturn(true);
+    Cache<Item, Long> advInvSpread = CacheBuilder.newBuilder().maximumSize(100)
+        .expireAfterWrite(1, TimeUnit.HOURS).recordStats().build();
+    Mockito.when(peer.getAdvInvSpread()).thenReturn(advInvSpread);
+    P2pRateLimiter p2pRateLimiter = new P2pRateLimiter();
+    p2pRateLimiter.register(FETCH_INV_DATA.asByte(), 1);
+    p2pRateLimiter.acquire(FETCH_INV_DATA.asByte());
+    Mockito.when(peer.getP2pRateLimiter()).thenReturn(p2pRateLimiter);
+    FetchInvDataMsgHandler fetchInvDataMsgHandler = new FetchInvDataMsgHandler();
+
+    Exception e1 = Assert.assertThrows(Exception.class,
+        () -> fetchInvDataMsgHandler.processMessage(peer, msg));
+    Assert.assertEquals("fetch too many blocks, size:101", e1.getMessage());
+
+    Exception e2 = Assert.assertThrows(Exception.class,
+        () -> fetchInvDataMsgHandler.processMessage(peer, msg));
+    Assert.assertTrue(e2.getMessage().endsWith("rate limit"));
+  }
 }

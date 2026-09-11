@@ -22,6 +22,7 @@ import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 import org.tron.common.BaseTest;
+import org.tron.common.TestConstants;
 import org.tron.common.runtime.RuntimeImpl;
 import org.tron.common.runtime.TvmTestUtils;
 import org.tron.common.utils.ByteArray;
@@ -52,7 +53,6 @@ public class TransactionTraceTest extends BaseTest {
 
   public static final long totalBalance = 1000_0000_000_000L;
   private static String dbDirectory = "db_TransactionTrace_test";
-  private static String indexDirectory = "index_TransactionTrace_test";
   private static ByteString ownerAddress = ByteString.copyFrom(ByteArray.fromInt(1));
   private static ByteString contractAddress = ByteString.copyFrom(ByteArray.fromInt(2));
   private static String OwnerAddress = "TCWHANtDDdkZCTo2T2peyEq3Eg9c2XB7ut";
@@ -60,16 +60,13 @@ public class TransactionTraceTest extends BaseTest {
   private static boolean init;
 
   static {
-    dbPath = "output_TransactionTrace_test";
     Args.setParam(
         new String[]{
-            "--output-directory", dbPath,
+            "--output-directory", dbPath(),
             "--storage-db-directory", dbDirectory,
-            "--storage-index-directory", indexDirectory,
-            "-w",
             "--debug"
         },
-        "config-test-mainnet.conf"
+        TestConstants.TEST_CONF
     );
   }
 
@@ -382,5 +379,70 @@ public class TransactionTraceTest extends BaseTest {
     transactionTrace.setBill(0L);
     transactionTrace.pay();
     AccountCapsule accountCapsule1 = dbManager.getAccountStore().get(ownerAddress.toByteArray());
+  }
+
+
+  @Test
+  public void testTriggerUseUsageInWindowSizeV2() throws VMIllegalException, ContractExeException,
+          ContractValidateException, BalanceInsufficientException {
+    dbManager.getDynamicPropertiesStore().saveUnfreezeDelayDays(14);
+    dbManager.getDynamicPropertiesStore().saveAllowCancelAllUnfreezeV2(1);
+
+    String contractName = "tracetestContract";
+    String code = "608060405234801561001057600080fd5b5060005b6103e88110156100375760008181526020819"
+        + "05260409020819055600a01610014565b5061010f806100476000396000f300608060405260043610605257"
+        + "63ffffffff7c01000000000000000000000000000000000000000000000000000000006000350416634903b"
+        + "0d181146057578063da31158814607e578063fe4ba936146093575b600080fd5b348015606257600080fd5b"
+        + "50606c60043560ad565b60408051918252519081900360200190f35b348015608957600080fd5b50606c600"
+        + "43560bf565b348015609e57600080fd5b5060ab60043560243560d1565b005b600060208190529081526040"
+        + "90205481565b60009081526020819052604090205490565b600091825260208290526040909120555600a16"
+        + "5627a7a723058200596e6c0a5371c2c533eb97ba4c1c19b0521750a5624cb5d2e93249c8b7219d20029";
+    String abi = "[{\"constant\":true,\"inputs\":[{\"name\":\"\",\"type\":\"uint256\"}],\"name\":"
+        + "\"balances\",\"outputs\":[{\"name\":\"\",\"type\":\"uint256\"}],\"payable\":false,\"st"
+        + "ateMutability\":\"view\",\"type\":\"function\"},{\"constant\":true,\"inputs\":[{\"name"
+        + "\":\"account\",\"type\":\"uint256\"}],\"name\":\"getCoin\",\"outputs\":[{\"name\":\"\""
+        + ",\"type\":\"uint256\"}],\"payable\":false,\"stateMutability\":\"view\",\"type\":\"func"
+        + "tion\"},{\"constant\":false,\"inputs\":[{\"name\":\"receiver\",\"type\":\"uint256\"},{"
+        + "\"name\":\"amount\",\"type\":\"uint256\"}],\"name\":\"setCoin\",\"outputs\":[],\"payab"
+        + "le\":false,\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[],\""
+        + "payable\":false,\"stateMutability\":\"nonpayable\",\"type\":\"constructor\"}]";
+    CreateSmartContract smartContract = TvmTestUtils.createSmartContract(
+            Commons.decodeFromBase58Check(OwnerAddress), contractName, abi, code, 0,
+            100);
+    Transaction transaction = Transaction.newBuilder().setRawData(raw.newBuilder().addContract(
+        Contract.newBuilder().setParameter(Any.pack(smartContract))
+            .setType(ContractType.CreateSmartContract)).setFeeLimit(1000000000)
+                    .setTimestamp(System.currentTimeMillis()))
+            .build();
+
+    byte[] contractAddress = deployInit(transaction);
+    AccountCapsule accountCapsule = new AccountCapsule(ByteString.copyFrom("owner".getBytes()),
+            ByteString.copyFrom(Commons.decodeFromBase58Check(TriggerOwnerAddress)),
+            AccountType.Normal,
+            totalBalance);
+
+    accountCapsule.setFrozenForEnergy(10_000_000L, 0L);
+    dbManager.getAccountStore()
+            .put(Commons.decodeFromBase58Check(TriggerOwnerAddress), accountCapsule);
+    TriggerSmartContract triggerContract = TvmTestUtils.createTriggerContract(contractAddress,
+            "setCoin(uint256,uint256)", "133,133", false,
+            0, Commons.decodeFromBase58Check(TriggerOwnerAddress));
+    Transaction transaction2 = Transaction.newBuilder().setRawData(raw.newBuilder().addContract(
+            Contract.newBuilder().setParameter(Any.pack(triggerContract))
+                    .setType(ContractType.TriggerSmartContract)).setFeeLimit(1000000000L)).build();
+    TransactionCapsule transactionCapsule = new TransactionCapsule(transaction2);
+    TransactionTrace trace = new TransactionTrace(transactionCapsule, StoreFactory
+            .getInstance(), new RuntimeImpl());
+    trace.init(null);
+    trace.exec();
+    trace.pay();
+    Assert.assertEquals(0, trace.getReceipt().getEnergyUsage());
+    Assert.assertEquals(2025200, trace.getReceipt().getEnergyFee());
+    accountCapsule = dbManager.getAccountStore().get(accountCapsule.getAddress().toByteArray());
+    Assert.assertEquals(totalBalance,
+            accountCapsule.getBalance() + trace.getReceipt().getEnergyFee());
+
+    dbManager.getDynamicPropertiesStore().saveUnfreezeDelayDays(0);
+    dbManager.getDynamicPropertiesStore().saveAllowCancelAllUnfreezeV2(0);
   }
 }

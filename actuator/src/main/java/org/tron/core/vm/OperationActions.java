@@ -2,6 +2,7 @@ package org.tron.core.vm;
 
 import static org.tron.common.crypto.Hash.sha3;
 import static org.tron.common.utils.ByteUtil.EMPTY_BYTE_ARRAY;
+import static org.tron.common.utils.ByteUtil.numberOfLeadingZeros;
 
 import java.math.BigInteger;
 import java.util.ArrayList;
@@ -284,6 +285,17 @@ public class OperationActions {
 
     final DataWord result = word2.shiftRightSigned(word1);
     program.stackPush(result);
+    program.step();
+  }
+
+  public static void clzAction(Program program) {
+    DataWord word = program.stackPop();
+    int clz = numberOfLeadingZeros(word.getData());
+    if (clz == 256) {
+      program.stackPush(new DataWord(256));
+    } else {
+      program.stackPush(DataWord.of((byte) clz));
+    }
     program.step();
   }
 
@@ -643,6 +655,51 @@ public class OperationActions {
     program.step();
   }
 
+  public static void tLoadAction(Program program) {
+    DataWord key = program.stackPop();
+    DataWord address = program.getContractAddress();
+
+    byte[] data =
+        program.getContractState().getTransientStorageValue(address.getData(), key.getData());
+    DataWord value = data != null ? new DataWord(data).clone() : DataWord.ZERO();
+
+    program.stackPush(value);
+    program.step();
+  }
+
+  public static void tStoreAction(Program program) {
+    if (program.isStaticCall()) {
+      throw new Program.StaticCallModificationException();
+    }
+    DataWord key = program.stackPop();
+    DataWord value = program.stackPop();
+    DataWord address = program.getContractAddress();
+
+    program.getContractState()
+        .updateTransientStorageValue(address.getData(), key.getData(), value.getData());
+    program.step();
+  }
+
+  public static void mCopyAction(Program program) {
+    int dstOffset = program.stackPop().intValueSafe();
+    int srcOffset = program.stackPop().intValueSafe();
+    int length = program.stackPop().intValueSafe();
+
+    program.memoryCopy(dstOffset, srcOffset, length);
+    program.step();
+  }
+
+  public static void blobHashAction(Program program) {
+    program.stackPop();
+    program.stackPush(DataWord.ZERO());
+    program.step();
+  }
+
+  public static void blobBaseFeeAction(Program program) {
+    program.stackPush(DataWord.ZERO());
+    program.step();
+  }
+
   public static void push0Action(Program program) {
     program.stackPush(DataWord.ZERO());
     program.step();
@@ -989,6 +1046,9 @@ public class OperationActions {
     PrecompiledContracts.PrecompiledContract contract =
         PrecompiledContracts.getContractForAddress(codeAddress);
     if (contract != null) {
+      if (program.isConstantCall()) {
+        contract =  PrecompiledContracts.getOptimizedContractForConstant(contract);
+      }
       program.callToPrecompiledAddress(msg, contract);
     } else {
       program.callToAddress(msg);
@@ -1019,6 +1079,21 @@ public class OperationActions {
     } else {
       DataWord address = program.stackPop();
       program.suicide(address);
+    }
+
+    program.stop();
+  }
+
+  public static void suicideAction2(Program program) {
+    if (program.isStaticCall()) {
+      throw new Program.StaticCallModificationException();
+    }
+
+    if (!program.canSuicide2()) {
+      program.getResult().setRevert();
+    } else {
+      DataWord address = program.stackPop();
+      program.suicide2(address);
     }
 
     program.stop();

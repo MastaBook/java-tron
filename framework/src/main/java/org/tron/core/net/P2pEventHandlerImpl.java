@@ -19,6 +19,7 @@ import org.tron.core.net.message.MessageTypes;
 import org.tron.core.net.message.PbftMessageFactory;
 import org.tron.core.net.message.TronMessage;
 import org.tron.core.net.message.TronMessageFactory;
+import org.tron.core.net.message.adv.FetchInvDataMessage;
 import org.tron.core.net.message.adv.InventoryMessage;
 import org.tron.core.net.message.base.DisconnectMessage;
 import org.tron.core.net.message.handshake.HelloMessage;
@@ -35,9 +36,11 @@ import org.tron.core.net.peer.PeerManager;
 import org.tron.core.net.service.effective.EffectiveCheckService;
 import org.tron.core.net.service.handshake.HandshakeService;
 import org.tron.core.net.service.keepalive.KeepAliveService;
+import org.tron.core.net.service.statistics.MessageStatistics;
 import org.tron.p2p.P2pEventHandler;
 import org.tron.p2p.connection.Channel;
 import org.tron.protos.Protocol;
+import org.tron.protos.Protocol.Inventory.InventoryType;
 
 @Slf4j(topic = "net")
 @Component
@@ -89,6 +92,7 @@ public class P2pEventHandlerImpl extends P2pEventHandler {
   private byte MESSAGE_MAX_TYPE = 127;
 
   private int maxCountIn10s = Args.getInstance().getMaxTps() * 10;
+  private int maxBlockInvIn10s = Args.getInstance().getMaxBlockInvPerSecond() * 10;
 
   public P2pEventHandlerImpl() {
     Set<Byte> set = new HashSet<>();
@@ -147,19 +151,8 @@ public class P2pEventHandlerImpl extends P2pEventHandler {
       msg = TronMessageFactory.create(data);
       type = msg.getType();
 
-      if (INVENTORY.equals(type)) {
-        InventoryMessage message = (InventoryMessage) msg;
-        Protocol.Inventory.InventoryType inventoryType = message.getInventoryType();
-        int count = peer.getPeerStatistics().messageStatistics.tronInTrxInventoryElement
-                .getCount(10);
-        if (inventoryType.equals(Protocol.Inventory.InventoryType.TRX) && count > maxCountIn10s) {
-          logger.warn("Drop inventory from Peer {}, cur:{}, max:{}",
-                  peer.getInetAddress(), count, maxCountIn10s);
-          if (Args.getInstance().isOpenPrintLog()) {
-            logger.warn("[overload]Drop tx list is: {}", ((InventoryMessage) msg).getHashList());
-          }
-          return;
-        }
+      if (INVENTORY.equals(type) && !checkInvRateLimit(peer, (InventoryMessage) msg)) {
+        return;
       }
 
       peer.getPeerStatistics().messageStatistics.addTcpInMessage(msg);
@@ -176,9 +169,11 @@ public class P2pEventHandlerImpl extends P2pEventHandler {
           handshakeService.processHelloMessage(peer, (HelloMessage) msg);
           break;
         case P2P_DISCONNECT:
-          peer.getChannel().close();
-          peer.getNodeStatistics()
-                  .nodeDisconnectedRemote(((DisconnectMessage)msg).getReason());
+          if (peer.getP2pRateLimiter().tryAcquire(type.asByte())) {
+            peer.getChannel().close();
+            peer.getNodeStatistics()
+                .nodeDisconnectedRemote(((DisconnectMessage)msg).getReason());
+          }
           break;
         case SYNC_BLOCK_CHAIN:
           syncBlockChainMsgHandler.processMessage(peer, msg);
@@ -204,6 +199,7 @@ public class P2pEventHandlerImpl extends P2pEventHandler {
         default:
           throw new P2pException(P2pException.TypeEnum.NO_SUCH_MESSAGE, msg.getType().toString());
       }
+      updateLastInteractiveTime(peer, msg);
     } catch (Exception e) {
       processException(peer, msg, e);
     } finally {
@@ -219,6 +215,57 @@ public class P2pEventHandlerImpl extends P2pEventHandler {
     }
   }
 
+  private boolean checkInvRateLimit(PeerConnection peer, InventoryMessage msg)
+      throws P2pException {
+    InventoryType invType = msg.getInventoryType();
+    int currentSize = msg.getInventory().getIdsCount();
+    MessageStatistics stats = peer.getPeerStatistics().messageStatistics;
+
+    if (invType == InventoryType.TRX) {
+      int count = stats.tronInTrxInventoryElement.getCount(10);
+      if (count + currentSize > maxCountIn10s) {
+        logger.warn("Drop TRX inv from {}, window:{}, cur:{}, max:{}",
+            peer.getInetAddress(), count, currentSize, maxCountIn10s);
+        if (Args.getInstance().isOpenPrintLog()) {
+          logger.warn("[overload] Drop tx list: {}", msg.getHashList());
+        }
+        return false;
+      }
+    } else if (invType == InventoryType.BLOCK) {
+      int count = stats.tronInBlockInventoryElement.getCount(10);
+      if (count + currentSize > maxBlockInvIn10s) {
+        logger.warn("Drop BLOCK inv from {}, window:{}, cur:{}, max:{}",
+            peer.getInetAddress(), count, currentSize, maxBlockInvIn10s);
+        return false;
+      }
+    } else {
+      throw new P2pException(P2pException.TypeEnum.BAD_MESSAGE,
+          "unknown inventory type: " + msg.getInventory().getTypeValue());
+    }
+    return true;
+  }
+
+  private void updateLastInteractiveTime(PeerConnection peer, TronMessage msg) {
+    MessageTypes type = msg.getType();
+
+    boolean flag = false;
+    switch (type) {
+      case SYNC_BLOCK_CHAIN:
+      case BLOCK_CHAIN_INVENTORY:
+      case BLOCK:
+        flag = true;
+        break;
+      case FETCH_INV_DATA:
+        flag = ((FetchInvDataMessage) msg).getInventoryType().equals(InventoryType.BLOCK);
+        break;
+      default:
+        break;
+    }
+    if (flag) {
+      peer.setLastInteractiveTime(System.currentTimeMillis());
+    }
+  }
+
   private void processException(PeerConnection peer, TronMessage msg, Exception ex) {
     Protocol.ReasonCode code;
 
@@ -229,11 +276,15 @@ public class P2pEventHandlerImpl extends P2pEventHandler {
           code = Protocol.ReasonCode.BAD_TX;
           break;
         case BAD_BLOCK:
+        case BLOCK_SIGN_INVALID:
+        case BLOCK_MERKLE_INVALID:
           code = Protocol.ReasonCode.BAD_BLOCK;
           break;
         case NO_SUCH_MESSAGE:
-        case MESSAGE_WITH_WRONG_LENGTH:
+          code = Protocol.ReasonCode.NO_SUCH_MESSAGE;
+          break;
         case BAD_MESSAGE:
+        case RATE_LIMIT_EXCEEDED:
           code = Protocol.ReasonCode.BAD_PROTOCOL;
           break;
         case SYNC_FAILED:

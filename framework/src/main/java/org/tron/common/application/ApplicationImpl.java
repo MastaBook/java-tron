@@ -1,25 +1,26 @@
 package org.tron.common.application;
 
+import java.util.concurrent.CountDownLatch;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
-import org.tron.common.logsfilter.EventPluginLoader;
-import org.tron.common.parameter.CommonParameter;
 import org.tron.core.ChainBaseManager;
 import org.tron.core.config.args.Args;
-import org.tron.core.config.args.DynamicArgs;
 import org.tron.core.consensus.ConsensusService;
 import org.tron.core.db.Manager;
-import org.tron.core.metrics.MetricsUtil;
 import org.tron.core.net.TronNetService;
-import org.tron.program.FullNode;
+import org.tron.core.services.event.EventService;
 import org.tron.program.SolidityNode;
 
 @Slf4j(topic = "app")
 @Component
 public class ApplicationImpl implements Application {
 
+  @Autowired
   private ServiceContainer services;
+
+  @Autowired
+  private EventService eventService;
 
   @Autowired
   private TronNetService tronNetService;
@@ -33,66 +34,51 @@ public class ApplicationImpl implements Application {
   @Autowired
   private ConsensusService consensusService;
 
-  @Autowired
-  private DynamicArgs dynamicArgs;
+  @Autowired(required = false)
+  private SolidityNode solidityNode;
 
-  @Override
-  public void setOptions(Args args) {
-    // not used
-  }
-
-  @Override
-  @Autowired
-  public void init(CommonParameter parameter) {
-    services = new ServiceContainer();
-  }
-
-  @Override
-  public void addService(Service service) {
-    services.add(service);
-  }
-
-  @Override
-  public void initServices(CommonParameter parameter) {
-    services.init(parameter);
-  }
+  private final CountDownLatch shutdown = new CountDownLatch(1);
 
   /**
    * start up the app.
    */
   public void startup() {
+    this.startServices();
+    eventService.init();
+    consensusService.start();
     if ((!Args.getInstance().isSolidityNode()) && (!Args.getInstance().isP2pDisable())) {
       tronNetService.start();
     }
-    consensusService.start();
-    MetricsUtil.init();
-    dynamicArgs.init();
   }
 
   @Override
   public void shutdown() {
-    logger.info("******** start to shutdown ********");
-    if (!Args.getInstance().isSolidityNode() && (!Args.getInstance().p2pDisable)) {
+    this.shutdownServices();
+    if (!Args.getInstance().isSolidityNode() && !Args.getInstance().p2pDisable) {
       tronNetService.close();
     }
     consensusService.stop();
-    synchronized (dbManager.getRevokingStore()) {
-      dbManager.getSession().reset();
-      closeRevokingStore();
-      closeAllStore();
+    eventService.close();
+    if (solidityNode != null) {
+      solidityNode.close();
     }
-    dbManager.stopRePushThread();
-    dbManager.stopRePushTriggerThread();
-    EventPluginLoader.getInstance().stopPlugin();
-    dbManager.stopFilterProcessThread();
-    dynamicArgs.close();
-    logger.info("******** end to shutdown ********");
-    FullNode.shutDownSign = true;
+    dbManager.close();
+    shutdown.countDown();
   }
 
   @Override
   public void startServices() {
     services.start();
+  }
+
+  @Override
+  public void blockUntilShutdown() {
+    try {
+      shutdown.await();
+    } catch (final InterruptedException e) {
+      logger.debug("Interrupted, exiting", e);
+      Thread.currentThread().interrupt();
+    }
   }
 
   @Override
@@ -108,15 +94,6 @@ public class ApplicationImpl implements Application {
   @Override
   public ChainBaseManager getChainBaseManager() {
     return chainBaseManager;
-  }
-
-  private void closeRevokingStore() {
-    logger.info("******** start to closeRevokingStore ********");
-    dbManager.getRevokingStore().shutdown();
-  }
-
-  private void closeAllStore() {
-    dbManager.closeAllStore();
   }
 
 }

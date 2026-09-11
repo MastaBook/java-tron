@@ -1,12 +1,19 @@
 package org.tron.core.capsule.utils;
 
+import static org.tron.common.math.Maths.pow;
+
+import com.google.protobuf.ByteString;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 import lombok.extern.slf4j.Slf4j;
 import org.junit.Assert;
 import org.junit.Test;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.common.utils.ByteArray;
+import org.tron.common.utils.MerkleRoot;
 import org.tron.common.utils.Sha256Hash;
 import org.tron.core.capsule.utils.MerkleTree.Leaf;
 
@@ -75,7 +82,7 @@ public class MerkleTreeTest {
       num = num >> 1;
       rank++;
     }
-    if (temp == Math.pow(2, rank - 1)) {
+    if (temp == pow(2, rank - 1, true)) {
       rank -= 1;
     }
     return rank;
@@ -88,12 +95,9 @@ public class MerkleTreeTest {
    */
   public void test0HashNum() {
     List<Sha256Hash> hashList = getHash(0);  //Empty list.
-    try {
-      MerkleTree.getInstance().createTree(hashList);
-      Assert.assertFalse(true);
-    } catch (Exception e) {
-      Assert.assertTrue(e instanceof IndexOutOfBoundsException);
-    }
+    Exception e = Assert.assertThrows(Exception.class,
+        () -> MerkleTree.build(hashList));
+    Assert.assertTrue(e instanceof IndexOutOfBoundsException);
   }
 
   @Test
@@ -107,7 +111,7 @@ public class MerkleTreeTest {
    */
   public void test1HashNum() {
     List<Sha256Hash> hashList = getHash(1);
-    MerkleTree tree = MerkleTree.getInstance().createTree(hashList);
+    MerkleTree tree = MerkleTree.build(hashList);
     Leaf root = tree.getRoot();
     Assert.assertEquals(root.getHash(), hashList.get(0));
 
@@ -130,7 +134,7 @@ public class MerkleTreeTest {
    */
   public void test2HashNum() {
     List<Sha256Hash> hashList = getHash(2);
-    MerkleTree tree = MerkleTree.getInstance().createTree(hashList);
+    MerkleTree tree = MerkleTree.build(hashList);
     Leaf root = tree.getRoot();
     Assert.assertEquals(root.getHash(), computeHash(hashList.get(0), hashList.get(1)));
 
@@ -168,9 +172,34 @@ public class MerkleTreeTest {
     for (int hashNum = 1; hashNum <= maxNum; hashNum++) {
       int maxRank = getRank(hashNum);
       List<Sha256Hash> hashList = getHash(hashNum);
-      MerkleTree tree = MerkleTree.getInstance().createTree(hashList);
+      MerkleTree tree = MerkleTree.build(hashList);
       Leaf root = tree.getRoot();
       pareTree(root, hashList, maxRank, 0, 0);
     }
+  }
+
+  @Test
+  public void testConcurrent() {
+    Sha256Hash root1 = Sha256Hash.wrap(
+        ByteString.fromHex("6cb38b4f493db8bacf26123cd4253bbfc530c708b97b3747e782f64097c3c482"));
+    Sha256Hash root2 = Sha256Hash.wrap(
+        ByteString.fromHex("4bfc60ea3de4f5d1476f839874df0aba38eec4e524d6fa63f5b19c4bf527eaf3"));
+    List<Sha256Hash> list1 = IntStream.range(0, 10000).mapToObj(i ->
+            Sha256Hash.of(true, ("byte1-" + i).getBytes(StandardCharsets.UTF_8)))
+        .collect(Collectors.toList());
+    List<Sha256Hash> list2 = IntStream.range(0, 10000).mapToObj(i ->
+            Sha256Hash.of(true, ("byte2-" + i).getBytes(StandardCharsets.UTF_8)))
+        .collect(Collectors.toList());
+    Assert.assertEquals(root1, MerkleTree.build(list1).getRoot().getHash());
+    Assert.assertEquals(root2, MerkleTree.build(list2).getRoot().getHash());
+    Assert.assertEquals(root1, MerkleRoot.root(list1));
+    Assert.assertEquals(root2, MerkleRoot.root(list2));
+    // MerkleTree.build is now per-instance with no shared state, so concurrent builds
+    // must yield correct roots without ArrayIndexOutOfBoundsException.
+    IntStream.range(0, 1000).parallel().forEach(i -> {
+      List<Sha256Hash> list = i % 2 == 0 ? list1 : list2;
+      Sha256Hash expect = i % 2 == 0 ? root1 : root2;
+      Assert.assertEquals(expect, MerkleTree.build(list).getRoot().getHash());
+    });
   }
 }

@@ -1,6 +1,5 @@
 package org.tron.core.services.filter;
 
-import com.google.common.base.Strings;
 import javax.servlet.Filter;
 import javax.servlet.FilterChain;
 import javax.servlet.FilterConfig;
@@ -9,6 +8,8 @@ import javax.servlet.ServletResponse;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
+import org.eclipse.jetty.http.BadMessageException;
+import org.eclipse.jetty.http.HttpStatus;
 import org.tron.common.prometheus.MetricKeys;
 import org.tron.common.prometheus.MetricLabels;
 import org.tron.common.prometheus.Metrics;
@@ -18,9 +19,9 @@ import org.tron.core.metrics.MetricsUtil;
 @Slf4j(topic = "httpInterceptor")
 public class HttpInterceptor implements Filter {
 
-  private String endpoint;
-  private final int HTTP_NOT_FOUND = 404;
   private final int HTTP_SUCCESS = 200;
+  private final int HTTP_BAD_REQUEST = 400;
+  private final int HTTP_NOT_ACCEPTABLE = 406;
 
   @Override
   public void init(FilterConfig filterConfig) {
@@ -28,66 +29,54 @@ public class HttpInterceptor implements Filter {
 
   @Override
   public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain) {
+    String endpoint = MetricLabels.UNDEFINED;
     try {
-      if (request instanceof HttpServletRequest) {
-        endpoint = ((HttpServletRequest) request).getRequestURI();
-
-        CharResponseWrapper responseWrapper = new CharResponseWrapper(
-            (HttpServletResponse) response);
-        chain.doFilter(request, responseWrapper);
-
-        HttpServletResponse resp = (HttpServletResponse) response;
-
-        if (resp.getStatus() != HTTP_NOT_FOUND) {  // correct endpoint
-          String endpointQPS = MetricsKey.NET_API_DETAIL_QPS + endpoint;
-          MetricsUtil.meterMark(MetricsKey.NET_API_QPS);
-          MetricsUtil.meterMark(endpointQPS);
-
-          int reposeContentSize = responseWrapper.getByteSize();
-          String endpointOutTraffic = MetricsKey.NET_API_DETAIL_OUT_TRAFFIC + endpoint;
-          MetricsUtil.meterMark(MetricsKey.NET_API_OUT_TRAFFIC,
-              reposeContentSize);
-          MetricsUtil.meterMark(endpointOutTraffic, reposeContentSize);
-
-          if (resp.getStatus() != HTTP_SUCCESS) {  //http fail
-            String endpointFailQPS = MetricsKey.NET_API_DETAIL_FAIL_QPS + endpoint;
-            MetricsUtil.meterMark(MetricsKey.NET_API_FAIL_QPS);
-            MetricsUtil.meterMark(endpointFailQPS);
-          }
-        } else { // wrong endpoint
-          MetricsUtil.meterMark(MetricsKey.NET_API_QPS);
-          MetricsUtil.meterMark(MetricsKey.NET_API_FAIL_QPS);
-        }
-        Metrics.histogramObserve(MetricKeys.Histogram.HTTP_BYTES,
-            responseWrapper.getByteSize(),
-            Strings.isNullOrEmpty(endpoint) ? MetricLabels.UNDEFINED : endpoint,
-            String.valueOf(responseWrapper.getStatus()));
-      } else {
+      if (!(request instanceof HttpServletRequest)) {
         chain.doFilter(request, response);
+        return;
       }
-
+      String contextPath = ((HttpServletRequest) request).getContextPath();
+      endpoint = contextPath + ((HttpServletRequest) request).getServletPath();
+      CharResponseWrapper responseWrapper = new CharResponseWrapper(
+              (HttpServletResponse) response);
+      chain.doFilter(request, responseWrapper);
+      HttpServletResponse resp = (HttpServletResponse) response;
+      int size = responseWrapper.getByteSize();
+      MetricsUtil.meterMark(MetricsKey.NET_API_OUT_TRAFFIC, size);
+      MetricsUtil.meterMark(MetricsKey.NET_API_QPS);
+      if (resp.getStatus() >= HTTP_BAD_REQUEST && resp.getStatus() <= HTTP_NOT_ACCEPTABLE) {
+        MetricsUtil.meterMark(MetricsKey.NET_API_FAIL_QPS);
+        Metrics.histogramObserve(MetricKeys.Histogram.HTTP_BYTES,
+                size, MetricLabels.UNDEFINED, String.valueOf(responseWrapper.getStatus()));
+        return;
+      }
+      if (resp.getStatus() == HTTP_SUCCESS) {
+        MetricsUtil.meterMark(MetricsKey.NET_API_DETAIL_QPS + endpoint);
+      } else {
+        MetricsUtil.meterMark(MetricsKey.NET_API_FAIL_QPS);
+        MetricsUtil.meterMark(MetricsKey.NET_API_DETAIL_FAIL_QPS + endpoint);
+      }
+      MetricsUtil.meterMark(MetricsKey.NET_API_DETAIL_OUT_TRAFFIC + endpoint, size);
+      Metrics.histogramObserve(MetricKeys.Histogram.HTTP_BYTES,
+              size, endpoint, String.valueOf(responseWrapper.getStatus()));
     } catch (Exception e) {
-
-      if (MetricsUtil.getMeters(MetricsKey.NET_API_DETAIL_QPS).containsKey(
-          MetricsKey.NET_API_DETAIL_QPS + endpoint)) {   // correct endpoint
-        MetricsUtil.meterMark(MetricsKey.NET_API_DETAIL_FAIL_QPS
-            + endpoint, 1);
-        MetricsUtil.meterMark(MetricsKey.NET_API_DETAIL_QPS
-            + endpoint, 1);
+      String key = MetricsKey.NET_API_DETAIL_QPS + endpoint;
+      if (MetricsUtil.getMeters(MetricsKey.NET_API_DETAIL_QPS).containsKey(key)) {
+        MetricsUtil.meterMark(key, 1);
+        MetricsUtil.meterMark(MetricsKey.NET_API_DETAIL_FAIL_QPS + endpoint, 1);
       }
       MetricsUtil.meterMark(MetricsKey.NET_API_QPS, 1);
       MetricsUtil.meterMark(MetricsKey.NET_API_FAIL_QPS, 1);
-
+      if (e instanceof BadMessageException
+          && ((BadMessageException) e).getCode() == HttpStatus.PAYLOAD_TOO_LARGE_413) {
+        throw (BadMessageException) e;
+      }
     }
-
   }
 
   @Override
   public void destroy() {
-
   }
-
 }
-
 
 

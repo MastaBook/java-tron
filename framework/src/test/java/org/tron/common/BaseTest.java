@@ -1,18 +1,22 @@
 package org.tron.common;
 
 import com.google.protobuf.ByteString;
-import java.io.File;
+import java.io.IOException;
+import javax.annotation.PostConstruct;
 import javax.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.lang3.StringUtils;
 import org.junit.AfterClass;
+import org.junit.Assert;
+import org.junit.ClassRule;
+import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
 import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.ContextConfiguration;
 import org.springframework.test.context.junit4.SpringJUnit4ClassRunner;
+import org.tron.common.application.Application;
 import org.tron.common.crypto.ECKey;
 import org.tron.common.parameter.CommonParameter;
-import org.tron.common.utils.FileUtil;
+import org.tron.common.utils.Commons;
 import org.tron.common.utils.Sha256Hash;
 import org.tron.consensus.base.Param;
 import org.tron.core.ChainBaseManager;
@@ -20,27 +24,80 @@ import org.tron.core.capsule.BlockCapsule;
 import org.tron.core.config.DefaultConfig;
 import org.tron.core.config.args.Args;
 import org.tron.core.db.Manager;
+import org.tron.core.exception.BalanceInsufficientException;
+import org.tron.core.net.peer.PeerConnection;
+import org.tron.core.net.peer.PeerManager;
+import org.tron.core.store.AccountStore;
 import org.tron.protos.Protocol;
 
+/**
+ * Base class for tests that need a Spring context (Manager, ChainBaseManager, etc.).
+ * The context is created once per test class.
+ *
+ * Args.setParam() is called in a static block, the context is shared by all @Test
+ * methods in the class, and destroyed in @AfterClass. This is faster but means
+ * test methods within the same class are not isolated from each other.
+ *
+ * Use this when:
+ *   - test methods are read-only or don't interfere with each other
+ *   - no need to change CommonParameter/Args between methods
+ *
+ * Use BaseMethodTest instead when:
+ *   - methods modify database state that would affect other methods
+ *   - methods need different CommonParameter settings (e.g. setP2pDisable)
+ *   - methods need beforeContext() to configure state before Spring starts
+ *
+ * Tests that don't need Spring (e.g. pure unit tests like ArgsTest,
+ * LevelDbDataSourceImplTest) should NOT extend either base class.
+ *
+ * Subclasses must call Args.setParam() in a static initializer block:
+ *   static {
+ *     Args.setParam(new String[]{"--output-directory", dbPath()}, TEST_CONF);
+ *   }
+ */
 @Slf4j
 @RunWith(SpringJUnit4ClassRunner.class)
 @ContextConfiguration(classes = {DefaultConfig.class})
 @DirtiesContext
 public abstract class BaseTest {
 
-  protected static String dbPath;
+  @ClassRule
+  public static final TemporaryFolder temporaryFolder = new TemporaryFolder();
+
   @Resource
   protected Manager dbManager;
   @Resource
   protected ChainBaseManager chainBaseManager;
 
+  @Resource
+  protected Application appT;
+
+  private static Application appT1;
+
+
+  @PostConstruct
+  private void prepare() {
+    appT1 = appT;
+  }
+
+  public static String dbPath() {
+    try {
+      return temporaryFolder.newFolder().toString();
+    } catch (IOException e) {
+      Assert.fail("create temp folder failed");
+    }
+    return null;
+  }
+
   @AfterClass
   public static void destroy() {
+    appT1.shutdown();
     Args.clearParam();
-    if (StringUtils.isNotEmpty(dbPath) && FileUtil.deleteDir(new File(dbPath))) {
-      logger.info("Release resources successful.");
-    } else {
-      logger.info("Release resources failure.");
+  }
+
+  public void closePeer() {
+    for (PeerConnection p : PeerManager.getPeers()) {
+      PeerManager.remove(p.getChannel());
     }
   }
 
@@ -80,5 +137,11 @@ public abstract class BaseTest {
         .build();
 
     return block.toBuilder().setBlockHeader(blockHeader).build();
+  }
+
+  public void adjustBalance(AccountStore accountStore, byte[] accountAddress, long amount)
+      throws BalanceInsufficientException {
+    Commons.adjustBalance(accountStore, accountAddress, amount,
+        chainBaseManager.getDynamicPropertiesStore().disableJavaLangMath());
   }
 }

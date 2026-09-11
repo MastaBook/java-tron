@@ -1,9 +1,18 @@
 package org.tron.common.logsfilter;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.Assert;
 import org.junit.Test;
+import org.pf4j.PluginDescriptor;
+import org.pf4j.PluginManager;
+import org.pf4j.PluginWrapper;
 import org.tron.common.logsfilter.trigger.BlockLogTrigger;
 import org.tron.common.logsfilter.trigger.TransactionLogTrigger;
 
@@ -15,20 +24,59 @@ public class EventLoaderTest {
     config.setSendQueueLength(1000);
     config.setBindPort(5555);
     config.setUseNativeQueue(true);
+    config.setPluginPath("pluginPath");
+    config.setServerAddress("serverAddress");
+    config.setDbConfig("dbConfig");
+    assertEquals("pluginPath", config.getPluginPath());
+    assertEquals("serverAddress", config.getServerAddress());
+    assertEquals("dbConfig", config.getDbConfig());
 
     List<TriggerConfig> triggerConfigList = new ArrayList<>();
 
-    TriggerConfig blockTriggerConfig = new TriggerConfig();
-    blockTriggerConfig.setTriggerName("block");
-    blockTriggerConfig.setEnabled(true);
-    blockTriggerConfig.setTopic("block");
-    triggerConfigList.add(blockTriggerConfig);
+    TriggerConfig triggerConfig = new TriggerConfig();
+    triggerConfig.setTriggerName("block");
+    triggerConfig.setEnabled(true);
+    triggerConfig.setTopic("topic");
+    triggerConfig.setRedundancy(false);
+    triggerConfig.setEthCompatible(false);
+    triggerConfig.setSolidified(false);
+    assertFalse(triggerConfig.isRedundancy());
+    assertFalse(triggerConfig.isEthCompatible());
+    assertFalse(triggerConfig.isSolidified());
+    assertEquals("topic", triggerConfig.getTopic());
+    triggerConfigList.add(triggerConfig);
 
     config.setTriggerConfigList(triggerConfigList);
 
-    Assert.assertTrue(EventPluginLoader.getInstance().start(config));
+    assertTrue(EventPluginLoader.getInstance().start(config));
 
     EventPluginLoader.getInstance().stopPlugin();
+  }
+
+  @Test
+  public void testIsPluginVersionSupported() {
+    assertEquals("3.0.0", EventPluginLoader.MIN_PLUGIN_VERSION);
+    // last releases before fastjson removal — must be rejected
+    assertFalse(checkVersion("1.0.0"));
+    assertFalse(checkVersion("2.2.0"));
+    assertFalse(checkVersion("2.9.9"));
+    // 3.0.0 onward — must be accepted
+    assertTrue(checkVersion("3.0.0"));
+    assertTrue(checkVersion("3.1.5"));
+    assertTrue(checkVersion("10.0.0"));
+    // empty/null version — reject
+    assertFalse(checkVersion(""));
+    assertFalse(checkVersion(null));
+  }
+
+  private static boolean checkVersion(String version) {
+    PluginManager pm = mock(PluginManager.class);
+    PluginWrapper wrapper = mock(PluginWrapper.class);
+    PluginDescriptor desc = mock(PluginDescriptor.class);
+    when(pm.getPlugin("test")).thenReturn(wrapper);
+    when(wrapper.getDescriptor()).thenReturn(desc);
+    when(desc.getVersion()).thenReturn(version);
+    return EventPluginLoader.isPluginVersionSupported(pm, "test");
   }
 
   @Test

@@ -16,7 +16,9 @@
 package org.tron.core.utils;
 
 import static org.tron.common.crypto.Hash.sha3omit12;
+import static org.tron.common.math.Maths.max;
 import static org.tron.core.config.Parameter.ChainConstant.DELEGATE_COST_BASE_SIZE;
+import static org.tron.core.Constant.PER_SIGN_LENGTH;
 import static org.tron.core.config.Parameter.ChainConstant.TRX_PRECISION;
 
 import com.google.common.base.CaseFormat;
@@ -39,11 +41,11 @@ import org.tron.api.GrpcAPI.TransactionSignWeight.Result;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.common.utils.Sha256Hash;
 import org.tron.core.ChainBaseManager;
-import org.tron.core.Constant;
 import org.tron.core.capsule.AccountCapsule;
 import org.tron.core.capsule.TransactionCapsule;
 import org.tron.core.exception.PermissionException;
 import org.tron.core.exception.SignatureFormatException;
+import org.tron.core.store.DynamicPropertiesStore;
 import org.tron.protos.Protocol.Permission;
 import org.tron.protos.Protocol.Permission.PermissionType;
 import org.tron.protos.Protocol.Transaction;
@@ -51,7 +53,6 @@ import org.tron.protos.Protocol.Transaction.Contract;
 import org.tron.protos.Protocol.Transaction.Result.contractResult;
 import org.tron.protos.contract.SmartContractOuterClass.CreateSmartContract;
 import org.tron.protos.contract.SmartContractOuterClass.TriggerSmartContract;
-import org.tron.protos.Protocol.Transaction.Contract.ContractType;
 import org.tron.protos.contract.BalanceContract.DelegateResourceContract;
 
 @Slf4j(topic = "capsule")
@@ -183,8 +184,30 @@ public class TransactionUtil {
         .replace("_", "");
   }
 
+  public static Transaction truncateSignatures(Transaction trx) {
+    Transaction.Builder builder = trx.toBuilder().clearSignature();
+    for (ByteString sig : trx.getSignatureList()) {
+      if (sig.size() > PER_SIGN_LENGTH) {
+        builder.addSignature(ByteString.copyFrom(sig.substring(0, PER_SIGN_LENGTH).toByteArray()));
+      } else {
+        builder.addSignature(sig);
+      }
+    }
+    return builder.build();
+  }
+
   public TransactionSignWeight getTransactionSignWeight(Transaction trx) {
     TransactionSignWeight.Builder tswBuilder = TransactionSignWeight.newBuilder();
+    Result.Builder resultBuilder = Result.newBuilder();
+    if (trx.getSignatureCount() > chainBaseManager.getDynamicPropertiesStore()
+        .getTotalSignNum()) {
+      resultBuilder.setCode(Result.response_code.OTHER_ERROR);
+      resultBuilder.setMessage("too many signatures");
+      tswBuilder.setResult(resultBuilder);
+      return tswBuilder.build();
+    }
+
+    trx = truncateSignatures(trx);
     TransactionExtention.Builder trxExBuilder = TransactionExtention.newBuilder();
     trxExBuilder.setTransaction(trx);
     trxExBuilder.setTxid(ByteString.copyFrom(Sha256Hash.hash(CommonParameter
@@ -193,7 +216,6 @@ public class TransactionUtil {
     retBuilder.setResult(true).setCode(response_code.SUCCESS);
     trxExBuilder.setResult(retBuilder);
     tswBuilder.setTransaction(trxExBuilder);
-    Result.Builder resultBuilder = Result.newBuilder();
 
     if (trx.getRawData().getContractCount() == 0) {
       resultBuilder.setCode(Result.response_code.OTHER_ERROR);
@@ -222,7 +244,7 @@ public class TransactionUtil {
         }
         tswBuilder.setPermission(permission);
         if (trx.getSignatureCount() > 0) {
-          List<ByteString> approveList = new ArrayList<ByteString>();
+          List<ByteString> approveList = new ArrayList<>();
           long currentWeight = TransactionCapsule.checkWeight(permission, trx.getSignatureList(),
               Sha256Hash.hash(CommonParameter.getInstance()
                   .isECKeyCryptoEngine(), trx.getRawData().toByteArray()), approveList);
@@ -253,56 +275,24 @@ public class TransactionUtil {
     return tswBuilder.build();
   }
 
-  public static long consumeBandWidthSize(
-          final TransactionCapsule transactionCapsule,
-          ChainBaseManager chainBaseManager) {
-    long bytesSize;
-
-    boolean supportVM = chainBaseManager.getDynamicPropertiesStore().supportVM();
-    if (supportVM) {
-      bytesSize = transactionCapsule.getInstance().toBuilder().clearRet().build().getSerializedSize();
-    } else {
-      bytesSize = transactionCapsule.getSerializedSize();
-    }
-
-    List<Transaction.Contract> contracts = transactionCapsule.getInstance().getRawData().getContractList();
-    for (Transaction.Contract contract : contracts) {
-      if (contract.getType() == Contract.ContractType.ShieldedTransferContract) {
-        continue;
-      }
-      if (supportVM) {
-        bytesSize += Constant.MAX_RESULT_SIZE_IN_TX;
-      }
-    }
-
-    return bytesSize;
-  }
-
-  public static long estimateConsumeBandWidthSize(final AccountCapsule ownerCapsule,
-      ChainBaseManager chainBaseManager) {
+  public static long estimateConsumeBandWidthSize(DynamicPropertiesStore dps, long balance) {
     DelegateResourceContract.Builder builder;
-    if (chainBaseManager.getDynamicPropertiesStore().supportMaxDelegateLockPeriod()) {
+    if (dps.supportMaxDelegateLockPeriod()) {
       builder = DelegateResourceContract.newBuilder()
-          .setLock(true)
-          .setLockPeriod(chainBaseManager.getDynamicPropertiesStore().getMaxDelegateLockPeriod())
-          .setBalance(ownerCapsule.getFrozenV2BalanceForBandwidth());
+              .setLock(true)
+              .setLockPeriod(dps.getMaxDelegateLockPeriod())
+              .setBalance(balance);
     } else {
       builder = DelegateResourceContract.newBuilder()
-          .setLock(true)
-          .setBalance(ownerCapsule.getFrozenV2BalanceForBandwidth());
+              .setLock(true)
+              .setBalance(balance);
     }
-    TransactionCapsule fakeTransactionCapsule = new TransactionCapsule(builder.build()
-            , ContractType.DelegateResourceContract);
-    long size1 = consumeBandWidthSize(fakeTransactionCapsule, chainBaseManager);
-
+    long builderSize = builder.build().getSerializedSize();
     DelegateResourceContract.Builder builder2 = DelegateResourceContract.newBuilder()
-                    .setBalance(TRX_PRECISION);
-    TransactionCapsule fakeTransactionCapsule2 = new TransactionCapsule(builder2.build()
-            , ContractType.DelegateResourceContract);
-    long size2 = consumeBandWidthSize(fakeTransactionCapsule2, chainBaseManager);
-    long addSize = Math.max(size1 - size2, 0L);
+        .setBalance(TRX_PRECISION);
+    long builder2Size = builder2.build().getSerializedSize();
+    long addSize = max(builderSize - builder2Size, 0L, dps.disableJavaLangMath());
 
     return DELEGATE_COST_BASE_SIZE + addSize;
   }
-
 }

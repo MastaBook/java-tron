@@ -1,13 +1,15 @@
 package org.tron.common.runtime.vm;
 
-import java.io.File;
+import java.io.IOException;
 import lombok.extern.slf4j.Slf4j;
 import org.bouncycastle.util.encoders.Hex;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
+import org.junit.rules.TemporaryFolder;
+import org.tron.common.TestConstants;
 import org.tron.common.application.TronApplicationContext;
 import org.tron.common.runtime.Runtime;
-import org.tron.common.utils.FileUtil;
 import org.tron.consensus.dpos.DposSlot;
 import org.tron.consensus.dpos.MaintenanceManager;
 import org.tron.core.ChainBaseManager;
@@ -26,8 +28,8 @@ import org.tron.protos.Protocol;
 
 @Slf4j
 public class VMContractTestBase {
-
-  protected String dbPath;
+  @Rule
+  public TemporaryFolder temporaryFolder = new TemporaryFolder();
   protected Runtime runtime;
   protected Manager manager;
   protected Repository rootRepository;
@@ -44,15 +46,14 @@ public class VMContractTestBase {
   MortgageService mortgageService;
 
   static {
-    // 27Ssb1WE8FArwJVRRb8Dwy3ssVGuLY8L3S1 (test.config)
-    WITNESS_SR1_ADDRESS =
-        Constant.ADD_PRE_FIX_STRING_TESTNET + "299F3DB80A24B20A254B89CE639D59132F157F13";
+    // TDmHUBuko2qhcKBCGGafu928hMRj1tX2RW (test.config)
+    WITNESS_SR1_ADDRESS = "41" + "299F3DB80A24B20A254B89CE639D59132F157F13";
   }
 
   @Before
-  public void init() {
-    dbPath = "output_" + this.getClass().getName();
-    Args.setParam(new String[]{"--output-directory", dbPath, "--debug"}, Constant.TEST_CONF);
+  public void init() throws IOException {
+    Args.setParam(new String[]{"--output-directory",
+        temporaryFolder.newFolder().toString(), "--debug"}, TestConstants.TEST_CONF);
     context = new TronApplicationContext(DefaultConfig.class);
 
     // TRdmP9bYvML7dGUX9Rbw2kZrE2TayPZmZX - 41abd4b9367799eaa3197fecb144eb71de1e049abc
@@ -77,10 +78,5 @@ public class VMContractTestBase {
   public void destroy() {
     Args.clearParam();
     context.destroy();
-    if (FileUtil.deleteDir(new File(dbPath))) {
-      logger.info("Release resources successful.");
-    } else {
-      logger.error("Release resources failure.");
-    }
   }
 }

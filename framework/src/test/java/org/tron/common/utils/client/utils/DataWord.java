@@ -18,10 +18,13 @@ package org.tron.common.utils.client.utils;
  * along with the ethereumJ library. If not, see <http://www.gnu.org/licenses/>.
  */
 
+import static org.tron.common.math.Maths.signum;
+
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonValue;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
+import java.util.Locale;
 
 import org.bouncycastle.util.Arrays;
 import org.bouncycastle.util.encoders.Hex;
@@ -429,7 +432,7 @@ public class DataWord implements Comparable<DataWord> {
   }
 
   public String shortHex() {
-    String hexValue = Hex.toHexString(getNoLeadZeroesData()).toUpperCase();
+    String hexValue = Hex.toHexString(getNoLeadZeroesData()).toUpperCase(Locale.ROOT);
     return "0x" + hexValue.replaceFirst("^0+(?!$)", "");
   }
 
@@ -466,7 +469,7 @@ public class DataWord implements Comparable<DataWord> {
         data, 0, data.length,
         o.getData(), 0, o.getData().length);
     // Convert result into -1, 0 or 1 as is the convention
-    return (int) Math.signum(result);
+    return (int) signum(result, true);
   }
 
   /**

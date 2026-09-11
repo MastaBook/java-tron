@@ -1,5 +1,9 @@
 package org.tron.core.net.peer;
 
+import static org.tron.core.net.message.MessageTypes.FETCH_INV_DATA;
+import static org.tron.core.net.message.MessageTypes.P2P_DISCONNECT;
+import static org.tron.core.net.message.MessageTypes.SYNC_BLOCK_CHAIN;
+
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.google.protobuf.ByteString;
@@ -32,6 +36,7 @@ import org.tron.core.config.Parameter.NetConstants;
 import org.tron.core.config.args.Args;
 import org.tron.core.metrics.MetricsKey;
 import org.tron.core.metrics.MetricsUtil;
+import org.tron.core.net.P2pRateLimiter;
 import org.tron.core.net.TronNetDelegate;
 import org.tron.core.net.message.adv.InventoryMessage;
 import org.tron.core.net.message.adv.TransactionsMessage;
@@ -71,13 +76,25 @@ public class PeerConnection {
   @Getter
   private volatile boolean fetchAble;
 
+  @Setter
+  @Getter
+  private volatile boolean isBadPeer;
+
   @Getter
   @Setter
   private ByteString address;
 
   @Getter
   @Setter
-  private TronState tronState = TronState.INIT;
+  private volatile long lastInteractiveTime;
+
+  @Setter
+  @Getter
+  private volatile long blockRcvTime;
+
+  @Getter
+  @Setter
+  private volatile TronState tronState = TronState.INIT;
 
   @Autowired
   private TronNetDelegate tronNetDelegate;
@@ -115,15 +132,15 @@ public class PeerConnection {
   private Map<Item, Long> advInvRequest = new ConcurrentHashMap<>();
 
   @Setter
-  private BlockId fastForwardBlock;
+  private volatile BlockId fastForwardBlock;
 
   @Getter
-  private BlockId blockBothHave = new BlockId();
+  private volatile BlockId blockBothHave = new BlockId();
   @Getter
   private volatile long blockBothHaveUpdateTime = System.currentTimeMillis();
   @Setter
   @Getter
-  private BlockId lastSyncBlockId;
+  private volatile BlockId lastSyncBlockId;
   @Setter
   @Getter
   private volatile long remainNum;
@@ -138,7 +155,7 @@ public class PeerConnection {
   private Map<BlockId, Long> syncBlockRequested = new ConcurrentHashMap<>();
   @Setter
   @Getter
-  private Pair<Deque<BlockId>, Long> syncChainRequested = null;
+  private volatile Pair<Deque<BlockId>, Long> syncChainRequested = null;
   @Setter
   @Getter
   private Set<BlockId> syncBlockInProcess = new HashSet<>();
@@ -148,13 +165,23 @@ public class PeerConnection {
   @Setter
   @Getter
   private volatile boolean needSyncFromUs = true;
+  @Getter
+  private P2pRateLimiter p2pRateLimiter = new P2pRateLimiter();
 
   public void setChannel(Channel channel) {
     this.channel = channel;
-    if (relayNodes.stream().anyMatch(n -> n.getAddress().equals(channel.getInetAddress()))) {
+    if (relayNodes != null
+        && relayNodes.stream().anyMatch(n -> n.getAddress().equals(channel.getInetAddress()))) {
       this.isRelayPeer = true;
     }
     this.nodeStatistics = TronStatsManager.getNodeStatistics(channel.getInetAddress());
+    lastInteractiveTime = System.currentTimeMillis();
+    p2pRateLimiter.register(SYNC_BLOCK_CHAIN.asByte(),
+        Args.getInstance().getRateLimiterSyncBlockChain());
+    p2pRateLimiter.register(FETCH_INV_DATA.asByte(),
+        Args.getInstance().getRateLimiterFetchInvData());
+    p2pRateLimiter.register(P2P_DISCONNECT.asByte(),
+        Args.getInstance().getRateLimiterDisconnect());
   }
 
   public void setBlockBothHave(BlockId blockId) {
@@ -163,7 +190,11 @@ public class PeerConnection {
   }
 
   public boolean isIdle() {
-    return advInvRequest.isEmpty() && syncBlockRequested.isEmpty() && syncChainRequested == null;
+    return advInvRequest.isEmpty() && isSyncIdle();
+  }
+
+  public boolean isSyncIdle() {
+    return syncBlockRequested.isEmpty() && syncChainRequested == null;
   }
 
   public void sendMessage(Message message) {
@@ -193,13 +224,12 @@ public class PeerConnection {
   public void onDisconnect() {
     syncService.onDisconnect(this);
     advService.onDisconnect(this);
-    advInvReceive.cleanUp();
-    advInvSpread.cleanUp();
+    advInvReceive.invalidateAll();
+    advInvSpread.invalidateAll();
     advInvRequest.clear();
-    syncBlockIdCache.cleanUp();
+    syncBlockIdCache.invalidateAll();
     syncBlockToFetch.clear();
     syncBlockRequested.clear();
-    syncBlockInProcess.clear();
     syncBlockInProcess.clear();
   }
 
@@ -218,11 +248,13 @@ public class PeerConnection {
             + "syncBlockRequestedSize:%d\n"
             + "remainNum:%d\n"
             + "syncChainRequested:%d\n"
+            + "inactiveSeconds:%d\n"
             + "blockInProcess:%d\n",
         channel.getInetSocketAddress(),
         (now - channel.getStartTime()) / Constant.ONE_THOUSAND,
         channel.getAvgLatency(),
-        fastForwardBlock != null ? fastForwardBlock.getNum() : blockBothHave.getNum(),
+        fastForwardBlock != null ? fastForwardBlock.getNum() : String.format("%d [%ds]",
+            blockBothHave.getNum(), (now - blockBothHaveUpdateTime) / Constant.ONE_THOUSAND),
         isNeedSyncFromPeer(),
         isNeedSyncFromUs(),
         syncBlockToFetch.size(),
@@ -231,6 +263,7 @@ public class PeerConnection {
         remainNum,
         requested == null ? 0 : (now - requested.getValue())
                 / Constant.ONE_THOUSAND,
+        (now - lastInteractiveTime) / Constant.ONE_THOUSAND,
         syncBlockInProcess.size());
   }
 

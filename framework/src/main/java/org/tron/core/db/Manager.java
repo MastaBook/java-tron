@@ -1,6 +1,10 @@
 package org.tron.core.db;
 
+import static org.tron.common.math.Maths.floorDiv;
+import static org.tron.common.math.Maths.max;
+import static org.tron.common.math.Maths.min;
 import static org.tron.common.utils.Commons.adjustBalance;
+import static org.tron.core.Constant.TRANSACTION_MAX_BYTE_SIZE;
 import static org.tron.core.exception.BadBlockException.TypeEnum.CALC_MERKLE_ROOT_FAILED;
 import static org.tron.protos.Protocol.Transaction.Contract.ContractType.TransferContract;
 import static org.tron.protos.Protocol.Transaction.Result.contractResult.SUCCESS;
@@ -17,6 +21,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
@@ -29,7 +34,6 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.PriorityBlockingQueue;
@@ -43,12 +47,16 @@ import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections4.CollectionUtils;
 import org.bouncycastle.util.encoders.Hex;
-import org.quartz.CronExpression;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
+import org.tron.api.GrpcAPI;
 import org.tron.api.GrpcAPI.TransactionInfoList;
 import org.tron.common.args.GenesisBlock;
 import org.tron.common.bloom.Bloom;
+import org.tron.common.cron.CronExpression;
+import org.tron.common.es.ExecutorServiceManager;
+import org.tron.common.exit.ExitManager;
 import org.tron.common.logsfilter.EventPluginLoader;
 import org.tron.common.logsfilter.FilterQuery;
 import org.tron.common.logsfilter.capsule.BlockFilterCapsule;
@@ -92,6 +100,7 @@ import org.tron.core.capsule.TransactionInfoCapsule;
 import org.tron.core.capsule.TransactionRetCapsule;
 import org.tron.core.capsule.WitnessCapsule;
 import org.tron.core.capsule.utils.TransactionUtil;
+import org.tron.core.config.Parameter;
 import org.tron.core.config.Parameter.ChainConstant;
 import org.tron.core.config.args.Args;
 import org.tron.core.consensus.ProposalController;
@@ -101,10 +110,10 @@ import org.tron.core.db.accountstate.callback.AccountStateCallBack;
 import org.tron.core.db.api.AssetUpdateHelper;
 import org.tron.core.db.api.BandwidthPriceHistoryLoader;
 import org.tron.core.db.api.EnergyPriceHistoryLoader;
+import org.tron.core.db.api.MigrateTurkishKeyHelper;
 import org.tron.core.db.api.MoveAbiHelper;
 import org.tron.core.db2.ISession;
 import org.tron.core.db2.core.Chainbase;
-import org.tron.core.db2.core.ITronChainBase;
 import org.tron.core.db2.core.SnapshotManager;
 import org.tron.core.exception.AccountResourceInsufficientException;
 import org.tron.core.exception.BadBlockException;
@@ -123,6 +132,7 @@ import org.tron.core.exception.TaposException;
 import org.tron.core.exception.TooBigTransactionException;
 import org.tron.core.exception.TooBigTransactionResultException;
 import org.tron.core.exception.TransactionExpirationException;
+import org.tron.core.exception.TronError;
 import org.tron.core.exception.UnLinkedBlockException;
 import org.tron.core.exception.VMIllegalException;
 import org.tron.core.exception.ValidateScheduleException;
@@ -131,6 +141,9 @@ import org.tron.core.exception.ZksnarkException;
 import org.tron.core.metrics.MetricsKey;
 import org.tron.core.metrics.MetricsUtil;
 import org.tron.core.service.MortgageService;
+import org.tron.core.service.RewardViCalService;
+import org.tron.core.services.event.exception.EventException;
+import org.tron.core.services.jsonrpc.TronJsonRpcImpl;
 import org.tron.core.store.AccountAssetStore;
 import org.tron.core.store.AccountIdIndexStore;
 import org.tron.core.store.AccountIndexStore;
@@ -156,6 +169,7 @@ import org.tron.core.store.VotesStore;
 import org.tron.core.store.WitnessScheduleStore;
 import org.tron.core.store.WitnessStore;
 import org.tron.core.utils.TransactionRegister;
+import org.tron.protos.Protocol;
 import org.tron.protos.Protocol.AccountType;
 import org.tron.protos.Protocol.Permission;
 import org.tron.protos.Protocol.Transaction;
@@ -180,8 +194,8 @@ public class Manager {
   @Setter
   public boolean eventPluginLoaded = false;
   private int maxTransactionPendingSize = Args.getInstance().getMaxTransactionPendingSize();
-  @Autowired(required = false)
   @Getter
+  @Autowired
   private TransactionCache transactionCache;
   @Autowired
   private KhaosDatabase khaosDb;
@@ -206,6 +220,7 @@ public class Manager {
   @Setter
   private MerkleContainer merkleContainer;
   private ExecutorService validateSignService;
+  private String validateSignName = "validate-sign";
   private boolean isRunRePushThread = true;
   private boolean isRunTriggerCapsuleProcessThread = true;
   private BlockingQueue<TransactionCapsule> pushTransactionQueue = new LinkedBlockingQueue<>();
@@ -235,6 +250,7 @@ public class Manager {
       Collections.synchronizedList(Lists.newArrayList());
   // the capacity is equal to Integer.MAX_VALUE default
   private BlockingQueue<TransactionCapsule> rePushTransactions;
+  @Getter
   private BlockingQueue<TriggerCapsule> triggerCapsuleQueue;
   // log filter
   private boolean isRunFilterProcessThread = true;
@@ -252,6 +268,20 @@ public class Manager {
 
   private AtomicInteger blockWaitLock = new AtomicInteger(0);
   private Object transactionLock = new Object();
+
+  private ExecutorService rePushEs;
+  private static final String rePushEsName = "repush";
+  private ExecutorService triggerEs;
+  private static final String triggerEsName = "event-trigger";
+  private ExecutorService filterEs;
+  private static final String filterEsName = "filter";
+
+  @Autowired
+  private RewardViCalService rewardViCalService;
+
+  @Lazy
+  @Autowired
+  private TronJsonRpcImpl tronJsonRpcImpl;
 
   /**
    * Cycle thread to rePush Transactions
@@ -276,6 +306,9 @@ public class Manager {
               Metrics.counterInc(MetricKeys.Counter.TXS, 1,
                   MetricLabels.Counter.TXS_FAIL, MetricLabels.Counter.TXS_FAIL_ERROR);
             }
+            ExitManager.findTronError(ex).ifPresent(e -> {
+              throw e;
+            });
           } finally {
             if (tx != null && getRePushTransactions().remove(tx)) {
               Metrics.gaugeInc(MetricKeys.Gauge.MANAGER_QUEUE, -1,
@@ -306,8 +339,10 @@ public class Manager {
         while (isRunFilterProcessThread) {
           try {
             FilterTriggerCapsule filterCapsule = filterCapsuleQueue.poll(1, TimeUnit.SECONDS);
-            if (filterCapsule != null) {
-              filterCapsule.processFilterTrigger();
+            if (filterCapsule instanceof LogsFilterCapsule) {
+              tronJsonRpcImpl.handleLogsFilter((LogsFilterCapsule) filterCapsule);
+            } else if (filterCapsule instanceof BlockFilterCapsule) {
+              tronJsonRpcImpl.handleBLockFilter((BlockFilterCapsule) filterCapsule);
             }
           } catch (InterruptedException e) {
             logger.error("FilterProcessLoop get InterruptedException, error is {}.",
@@ -344,6 +379,10 @@ public class Manager {
 
   public boolean needToSetBlackholePermission() {
     return getDynamicPropertiesStore().getSetBlackholeAccountPermission() == 0L;
+  }
+
+  private boolean needToMigrateTurkishKeys() {
+    return getDynamicPropertiesStore().getTurkishKeyMigrationDone() == 0L;
   }
 
   private void resetBlackholeAccountPermission() {
@@ -429,14 +468,21 @@ public class Manager {
 
   public void stopRePushThread() {
     isRunRePushThread = false;
+    ExecutorServiceManager.shutdownAndAwaitTermination(rePushEs, rePushEsName);
   }
 
   public void stopRePushTriggerThread() {
     isRunTriggerCapsuleProcessThread = false;
+    ExecutorServiceManager.shutdownAndAwaitTermination(triggerEs, triggerEsName);
   }
 
   public void stopFilterProcessThread() {
     isRunFilterProcessThread = false;
+    ExecutorServiceManager.shutdownAndAwaitTermination(filterEs, filterEsName);
+  }
+
+  public void stopValidateSignThread() {
+    ExecutorServiceManager.shutdownAndAwaitTermination(validateSignService, "validate-sign");
   }
 
   @PostConstruct
@@ -451,6 +497,7 @@ public class Manager {
     revokingStore.disable();
     revokingStore.check();
     transactionCache.initCache();
+    rewardViCalService.init();
     this.setProposalController(ProposalController.createInstance(this));
     this.setMerkleContainer(
         merkleContainer.createInstance(chainBaseManager.getMerkleTreeStore(),
@@ -478,13 +525,13 @@ public class Manager {
       logger.error(
           "Please delete database directory({}) and restart",
           Args.getInstance().getOutputDirectory());
-      System.exit(1);
+      throw new TronError(e, TronError.ErrCode.KHAOS_DB_INIT);
     } catch (BadItemException e) {
       logger.error("DB data broken {}.", e.getMessage());
       logger.error(
           "Please delete database directory({}) and restart.",
           Args.getInstance().getOutputDirectory());
-      System.exit(1);
+      throw new TronError(e, TronError.ErrCode.KHAOS_DB_INIT);
     }
     getChainBaseManager().getForkController().init(this.chainBaseManager);
 
@@ -508,6 +555,10 @@ public class Manager {
       resetBlackholeAccountPermission();
     }
 
+    if (needToMigrateTurkishKeys()) {
+      new MigrateTurkishKeyHelper(chainBaseManager).doWork();
+    }
+
     //for test only
     chainBaseManager.getDynamicPropertiesStore().updateDynamicStoreByConfig();
 
@@ -522,23 +573,21 @@ public class Manager {
       logger.info("Lite node lowestNum: {}", chainBaseManager.getLowestBlockNum());
     }
     revokingStore.enable();
-    validateSignService = Executors
-        .newFixedThreadPool(Args.getInstance().getValidateSignThreadNum());
-    Thread rePushThread = new Thread(rePushLoop);
-    rePushThread.setDaemon(true);
-    rePushThread.start();
+    validateSignService = ExecutorServiceManager
+        .newFixedThreadPool(validateSignName, Args.getInstance().getValidateSignThreadNum());
+    rePushEs = ExecutorServiceManager.newSingleThreadExecutor(rePushEsName, true);
+    ExecutorServiceManager.submit(rePushEs, rePushLoop);
     // add contract event listener for subscribing
     if (Args.getInstance().isEventSubscribe()) {
       startEventSubscribing();
-      Thread triggerCapsuleProcessThread = new Thread(triggerCapsuleProcessLoop);
-      triggerCapsuleProcessThread.setDaemon(true);
-      triggerCapsuleProcessThread.start();
+      triggerEs = ExecutorServiceManager.newSingleThreadExecutor(triggerEsName, true);
+      ExecutorServiceManager.submit(triggerEs, triggerCapsuleProcessLoop);
     }
 
     // start json rpc filter process
     if (CommonParameter.getInstance().isJsonRpcFilterEnabled()) {
-      Thread filterProcessThread = new Thread(filterProcessLoop);
-      filterProcessThread.start();
+      filterEs = ExecutorServiceManager.newSingleThreadExecutor(filterEsName);
+      ExecutorServiceManager.submit(filterEs, filterProcessLoop);
     }
 
     //initStoreFactory
@@ -551,7 +600,7 @@ public class Manager {
       initAutoStop();
     } catch (IllegalArgumentException e) {
       logger.error("Auto-stop params error: {}", e.getMessage());
-      System.exit(1);
+      throw new TronError(e, TronError.ErrCode.AUTO_STOP_PARAMS);
     }
 
     maxFlushCount = CommonParameter.getInstance().getStorage().getMaxFlushCount();
@@ -568,10 +617,9 @@ public class Manager {
       Args.getInstance().setChainId(genesisBlock.getBlockId().toString());
     } else {
       if (chainBaseManager.hasBlocks()) {
-        logger.error(
-            "Genesis block modify, please delete database directory({}) and restart.",
-            Args.getInstance().getOutputDirectory());
-        System.exit(1);
+        String msg = String.format("Genesis block modify, please delete database directory(%s) and "
+                + "restart.", Args.getInstance().getOutputDirectory());
+        throw new TronError(msg, TronError.ErrCode.GENESIS_BLOCK_INIT);
       } else {
         logger.info("Create genesis block.");
         Args.getInstance().setChainId(genesisBlock.getBlockId().toString());
@@ -776,12 +824,31 @@ public class Manager {
 
   void validateCommon(TransactionCapsule transactionCapsule)
       throws TransactionExpirationException, TooBigTransactionException {
+    boolean optimizeTxs = !transactionCapsule.isInBlock() || chainBaseManager
+        .getDynamicPropertiesStore().allowConsensusLogicOptimization();
+    if (optimizeTxs) {
+      transactionCapsule.removeRedundantRet();
+      long generalBytesSize =
+          transactionCapsule.getInstance().toBuilder().clearRet().build().getSerializedSize()
+              + Constant.MAX_RESULT_SIZE_IN_TX + Constant.MAX_RESULT_SIZE_IN_TX;
+      if (generalBytesSize > TRANSACTION_MAX_BYTE_SIZE) {
+        throw new TooBigTransactionException(String.format(
+            "Too big transaction with result, TxId %s, the size is %d bytes, maxTxSize %d",
+            transactionCapsule.getTransactionId(), generalBytesSize, TRANSACTION_MAX_BYTE_SIZE));
+      }
+    }
     if (transactionCapsule.getData().length > Constant.TRANSACTION_MAX_BYTE_SIZE) {
       throw new TooBigTransactionException(String.format(
-          "Too big transaction, the size is %d bytes", transactionCapsule.getData().length));
+          "Too big transaction, TxId %s, the size is %d bytes, maxTxSize %d",
+          transactionCapsule.getTransactionId(), transactionCapsule.getData().length,
+          TRANSACTION_MAX_BYTE_SIZE));
     }
     long transactionExpiration = transactionCapsule.getExpiration();
     long headBlockTime = chainBaseManager.getHeadBlockTimeStamp();
+    if (transactionCapsule.isInBlock()
+        && chainBaseManager.getDynamicPropertiesStore().allowConsensusLogicOptimization()) {
+      transactionCapsule.checkExpiration(chainBaseManager.getNextBlockSlotTime());
+    }
     if (transactionExpiration <= headBlockTime
         || transactionExpiration > headBlockTime + Constant.MAXIMUM_TIME_UNTIL_EXPIRATION) {
       throw new TransactionExpirationException(
@@ -822,9 +889,13 @@ public class Manager {
       TooBigTransactionException, TransactionExpirationException,
       ReceiptCheckErrException, VMIllegalException, TooBigTransactionResultException {
 
-    if (isShieldedTransaction(trx.getInstance()) && !Args.getInstance()
-        .isFullNodeAllowShieldedTransactionArgs()) {
-      return true;
+    if (isShieldedTransaction(trx.getInstance()) && !chainBaseManager.getDynamicPropertiesStore()
+        .supportShieldedTransaction()) {
+      throw new ContractValidateException("ShieldedTransferContract is not supported.");
+    }
+
+    if (isExchangeTransaction(trx.getInstance())) {
+      throw new ContractValidateException("ExchangeTransactionContract is rejected");
     }
 
     pushTransactionQueue.add(trx);
@@ -885,19 +956,20 @@ public class Manager {
       throws AccountResourceInsufficientException {
     if (trx.getInstance().getSignatureCount() > 1) {
       long fee = getDynamicPropertiesStore().getMultiSignFee();
-
+      boolean disableJavaLangMath = getDynamicPropertiesStore().disableJavaLangMath();
       List<Contract> contracts = trx.getInstance().getRawData().getContractList();
       for (Contract contract : contracts) {
         byte[] address = TransactionCapsule.getOwner(contract);
         AccountCapsule accountCapsule = getAccountStore().get(address);
         try {
           if (accountCapsule != null) {
-            adjustBalance(getAccountStore(), accountCapsule, -fee);
+            adjustBalance(getAccountStore(), accountCapsule, -fee, disableJavaLangMath);
 
             if (getDynamicPropertiesStore().supportBlackHoleOptimization()) {
               getDynamicPropertiesStore().burnTrx(fee);
             } else {
-              adjustBalance(getAccountStore(), this.getAccountStore().getBlackhole(), +fee);
+              adjustBalance(getAccountStore(), this.getAccountStore().getBlackhole(), +fee,
+                  disableJavaLangMath);
             }
           }
         } catch (BalanceInsufficientException e) {
@@ -922,19 +994,20 @@ public class Manager {
     if (fee == 0) {
       return;
     }
-
+    boolean disableJavaLangMath = getDynamicPropertiesStore().disableJavaLangMath();
     List<Contract> contracts = trx.getInstance().getRawData().getContractList();
     for (Contract contract : contracts) {
       byte[] address = TransactionCapsule.getOwner(contract);
       AccountCapsule accountCapsule = getAccountStore().get(address);
       try {
         if (accountCapsule != null) {
-          adjustBalance(getAccountStore(), accountCapsule, -fee);
+          adjustBalance(getAccountStore(), accountCapsule, -fee, disableJavaLangMath);
 
           if (getDynamicPropertiesStore().supportBlackHoleOptimization()) {
             getDynamicPropertiesStore().burnTrx(fee);
           } else {
-            adjustBalance(getAccountStore(), this.getAccountStore().getBlackhole(), +fee);
+            adjustBalance(getAccountStore(), this.getAccountStore().getBlackhole(), +fee,
+                disableJavaLangMath);
           }
         }
       } catch (BalanceInsufficientException e) {
@@ -949,7 +1022,7 @@ public class Manager {
 
   public void consumeBandwidth(TransactionCapsule trx, TransactionTrace trace)
       throws ContractValidateException, AccountResourceInsufficientException,
-      TooBigTransactionResultException {
+      TooBigTransactionResultException, TooBigTransactionException {
     BandwidthProcessor processor = new BandwidthProcessor(chainBaseManager);
     processor.consume(trx, trace);
   }
@@ -975,23 +1048,6 @@ public class Manager {
     } catch (ItemNotFoundException | BadItemException e) {
       logger.warn(e.getMessage(), e);
     }
-  }
-
-  public void pushVerifiedBlock(BlockCapsule block) throws ContractValidateException,
-      ContractExeException, ValidateSignatureException, AccountResourceInsufficientException,
-      TransactionExpirationException, TooBigTransactionException, DupTransactionException,
-      TaposException, ValidateScheduleException, ReceiptCheckErrException,
-      VMIllegalException, TooBigTransactionResultException, UnLinkedBlockException,
-      NonCommonBlockException, BadNumberBlockException, BadBlockException, ZksnarkException,
-      EventBloomException {
-    block.generatedByMyself = true;
-    long start = System.currentTimeMillis();
-    pushBlock(block);
-    logger.info("Push block cost: {} ms, blockNum: {}, blockHash: {}, trx count: {}.",
-        System.currentTimeMillis() - start,
-        block.getNum(),
-        block.getBlockId(),
-        block.getTransactions().size());
   }
 
   private void applyBlock(BlockCapsule block) throws ContractValidateException,
@@ -1069,7 +1125,10 @@ public class Manager {
       while (!getDynamicPropertiesStore()
           .getLatestBlockHeaderHash()
           .equals(binaryTree.getValue().peekLast().getParentHash())) {
-        reOrgContractTrigger();
+        if (EventPluginLoader.getInstance().getVersion() == 0) {
+          reOrgContractTrigger();
+          reOrgBlockTrigger();
+        }
         reOrgLogsFilter();
         eraseBlock();
       }
@@ -1082,6 +1141,18 @@ public class Manager {
         Exception exception = null;
         // todo  process the exception carefully later
         try (ISession tmpSession = revokingStore.buildSession()) {
+          if (!item.getBlk().validateSignature(
+              getDynamicPropertiesStore(), getAccountStore())) {
+            throw new ValidateSignatureException(
+                "switch fork: block " + item.getBlk().getNum() + " signature invalid");
+          }
+          // The new branch is applied on a rewound, diverged state where account permissions
+          // may have changed, so a cached signature-verification result is no longer
+          // trustworthy. Clear it to force every transaction to re-validate its signature
+          // against the fork-chain state.
+          for (TransactionCapsule tx : item.getBlk().getTransactions()) {
+            tx.setVerified(false);
+          }
           applyBlock(item.getBlk().setSwitch(true));
           tmpSession.commit();
         } catch (AccountResourceInsufficientException
@@ -1138,8 +1209,32 @@ public class Manager {
           }
         }
       }
+      // only reached when the whole new branch applied cleanly; a failed switch rethrows above
+      reApplyBlockEvents(first);
     }
 
+  }
+
+  private boolean isSameSig(TransactionCapsule tx1, TransactionCapsule tx2) {
+    if (tx1 == null || tx2 == null) {
+      return false;
+    }
+
+    if (tx1.getInstance().getSignatureCount() != tx2.getInstance().getSignatureCount()) {
+      return false;
+    }
+
+    boolean flag = true;
+    for (int i = 0; i < tx1.getInstance().getSignatureCount(); i++) {
+      ByteString sig1 = tx1.getInstance().getSignature(i);
+      ByteString sig2 = tx2.getInstance().getSignature(i);
+      if (!sig1.equals(sig2)) {
+        flag = false;
+        break;
+      }
+    }
+
+    return flag;
   }
 
   public List<TransactionCapsule> getVerifyTxs(BlockCapsule block) {
@@ -1149,8 +1244,8 @@ public class Manager {
     }
 
     List<TransactionCapsule> txs = new ArrayList<>();
-    Set<String> txIds = new HashSet<>();
-    Set<String> multiAddresses = new HashSet<>();
+    Map<String, TransactionCapsule> txMap = new HashMap<>();
+    Set<String> multiAddresses = new HashSet<>(ownerAddressSet);
 
     pendingTransactions.forEach(capsule -> {
       String txId = Hex.toHexString(capsule.getTransactionId().getBytes());
@@ -1158,14 +1253,14 @@ public class Manager {
         String address = Hex.toHexString(capsule.getOwnerAddress());
         multiAddresses.add(address);
       } else {
-        txIds.add(txId);
+        txMap.put(txId, capsule);
       }
     });
 
     block.getTransactions().forEach(capsule -> {
       String address = Hex.toHexString(capsule.getOwnerAddress());
       String txId = Hex.toHexString(capsule.getTransactionId().getBytes());
-      if (multiAddresses.contains(address) || !txIds.contains(txId)) {
+      if (multiAddresses.contains(address) || !isSameSig(capsule, txMap.get(txId))) {
         txs.add(capsule);
       } else {
         capsule.setVerified(true);
@@ -1190,6 +1285,11 @@ public class Manager {
       synchronized (this) {
         Metrics.histogramObserve(blockedTimer.get());
         blockedTimer.remove();
+        if (Metrics.enabled()) {
+          Metrics.histogramObserve(MetricKeys.Histogram.BLOCK_TRANSACTION_COUNT,
+              block.getTransactions().size(),
+              StringUtil.encode58Check(block.getWitnessAddress().toByteArray()));
+        }
         long headerNumber = getDynamicPropertiesStore().getLatestBlockHeaderNumber();
         if (block.getNum() <= headerNumber && khaosDb.containBlockInMiniStore(block.getBlockId())) {
           logger.info("Block {} is already exist.", block.getBlockId().getString());
@@ -1213,12 +1313,7 @@ public class Manager {
         try (PendingManager pm = new PendingManager(this)) {
 
           if (!block.generatedByMyself) {
-            if (!block.calcMerkleRoot().equals(block.getMerkleRoot())) {
-              logger.warn("Num: {}, the merkle root doesn't match, expect is {} , actual is {}.",
-                  block.getNum(), block.getMerkleRoot(), block.calcMerkleRoot());
-              throw new BadBlockException(CALC_MERKLE_ROOT_FAILED,
-                      String.format("The merkle hash is not validated for %d", block.getNum()));
-            }
+            block.validateMerkleRoot();
             consensus.receiveBlock(block);
           }
 
@@ -1290,23 +1385,18 @@ public class Manager {
 
               return;
             }
+            long oldSolidNum = getDynamicPropertiesStore().getLatestSolidifiedBlockNum();
             try (ISession tmpSession = revokingStore.buildSession()) {
-
-              long oldSolidNum =
-                      chainBaseManager.getDynamicPropertiesStore().getLatestSolidifiedBlockNum();
-
               applyBlock(newBlock, txs);
               tmpSession.commit();
-              // if event subscribe is enabled, post block trigger to queue
-              postBlockTrigger(newBlock);
-              // if event subscribe is enabled, post solidity trigger to queue
-              postSolidityTrigger(oldSolidNum,
-                      getDynamicPropertiesStore().getLatestSolidifiedBlockNum());
             } catch (Throwable throwable) {
               logger.error(throwable.getMessage(), throwable);
               khaosDb.removeBlk(block.getBlockId());
+              clearSolidityContractTriggerCache(block.getNum());
               throw throwable;
             }
+            long newSolidNum = getDynamicPropertiesStore().getLatestSolidifiedBlockNum();
+            blockTrigger(newBlock, oldSolidNum, newSolidNum);
           }
           logger.info(SAVE_BLOCK, newBlock);
         }
@@ -1336,6 +1426,35 @@ public class Manager {
     }
   }
 
+  void blockTrigger(final BlockCapsule block, long oldSolid, long newSolid) {
+    // post block and logs for jsonrpc
+    try {
+      if (CommonParameter.getInstance().isJsonRpcHttpFullNodeEnable()) {
+        postBlockFilter(block, false);
+        postLogsFilter(block, false, false);
+      }
+
+      if (CommonParameter.getInstance().isJsonRpcHttpSolidityNodeEnable()) {
+        postSolidityFilter(oldSolid, newSolid);
+      }
+
+      if (EventPluginLoader.getInstance().getVersion() != 0) {
+        lastUsedSolidityNum = newSolid;
+        return;
+      }
+
+      // if event subscribe is enabled, post block trigger to queue (real-time, not removed)
+      postBlockTrigger(block, false);
+      // if event subscribe is enabled, post solidity trigger to queue
+      // (also emits solidified-mode block/transaction triggers)
+      postSolidityTrigger(newSolid);
+    } catch (Exception e) {
+      logger.error("Block trigger failed. head: {}, oldSolid: {}, newSolid: {}",
+          block.getNum(), oldSolid, newSolid, e);
+      throw new TronError(e, TronError.ErrCode.EVENT_SUBSCRIBE_ERROR);
+    }
+  }
+
   public void updateDynamicProperties(BlockCapsule block) {
 
     chainBaseManager.getDynamicPropertiesStore()
@@ -1353,6 +1472,7 @@ public class Manager {
         (chainBaseManager.getDynamicPropertiesStore().getLatestBlockHeaderNumber()
             - chainBaseManager.getDynamicPropertiesStore().getLatestSolidifiedBlockNum()
             + 1));
+    chainBaseManager.setLatestSaveBlockTime(System.currentTimeMillis());
     Metrics.gaugeSet(MetricKeys.Gauge.HEADER_HEIGHT, block.getNum());
     Metrics.gaugeSet(MetricKeys.Gauge.HEADER_TIME, block.getTimeStamp());
   }
@@ -1394,8 +1514,14 @@ public class Manager {
     if (trxCap == null) {
       return null;
     }
-    Contract contract = trxCap.getInstance().getRawData().getContract(0);
     Sha256Hash txId = trxCap.getTransactionId();
+    if (trxCap.getInstance().getRawData().getContractList().size() != 1) {
+      throw new ContractSizeNotEqualToOneException(
+          String.format(
+              "tx %s contract size should be exactly 1, this is extend feature ,actual :%d",
+              txId, trxCap.getInstance().getRawData().getContractList().size()));
+    }
+    Contract contract = trxCap.getInstance().getRawData().getContract(0);
     final Histogram.Timer requestTimer = Metrics.histogramStartTimer(
         MetricKeys.Histogram.PROCESS_TRANSACTION_LATENCY,
         Objects.nonNull(blockCap) ? MetricLabels.BLOCK : MetricLabels.TRX,
@@ -1405,17 +1531,11 @@ public class Manager {
 
     if (Objects.nonNull(blockCap)) {
       chainBaseManager.getBalanceTraceStore().initCurrentTransactionBalanceTrace(trxCap);
+      trxCap.setInBlock(true);
     }
 
     validateTapos(trxCap);
     validateCommon(trxCap);
-
-    if (trxCap.getInstance().getRawData().getContractList().size() != 1) {
-      throw new ContractSizeNotEqualToOneException(
-          String.format(
-              "tx %s contract size should be exactly 1, this is extend feature ,actual :%d",
-          txId, trxCap.getInstance().getRawData().getContractList().size()));
-    }
 
     validateDup(trxCap);
 
@@ -1425,6 +1545,9 @@ public class Manager {
           String.format(" %s transaction signature validate failed", txId));
     }
 
+    if (!trxCap.isInBlock()) {
+      trxCap.sanitize();
+    }
     TransactionTrace trace = new TransactionTrace(trxCap, StoreFactory.getInstance(),
         new RuntimeImpl());
     trxCap.setTrxTrace(trace);
@@ -1467,7 +1590,8 @@ public class Manager {
 
     // if event subscribe is enabled, post contract triggers to queue
     // only trigger when process block
-    if (Objects.nonNull(blockCap) && !blockCap.isMerkleRootEmpty()) {
+    if (Objects.nonNull(blockCap) && !blockCap.isMerkleRootEmpty()
+        && EventPluginLoader.getInstance().getVersion() == 0) {
       String blockHash = blockCap.getBlockId().toString();
       postContractTrigger(trace, false, blockHash);
     }
@@ -1532,11 +1656,14 @@ public class Manager {
       }
     }
 
+    HistoryBlockHashUtil.write(this, blockCapsule);
+
     Set<String> accountSet = new HashSet<>();
     AtomicInteger shieldedTransCounts = new AtomicInteger(0);
     List<TransactionCapsule> toBePacked = new ArrayList<>();
     long currentSize = blockCapsule.getInstance().getSerializedSize();
     boolean isSort = Args.getInstance().isOpenTransactionSort();
+    int[] logSize = new int[] {pendingTransactions.size(), rePushTransactions.size(), 0, 0};
     while (pendingTransactions.size() > 0 || rePushTransactions.size() > 0) {
       boolean fromPending = false;
       TransactionCapsule trx;
@@ -1601,6 +1728,11 @@ public class Manager {
           accountSet.add(ownerAddress);
         }
       }
+
+      if (isExchangeTransaction(transaction)) {
+        continue;
+      }
+
       if (ownerAddressSet.contains(ownerAddress)) {
         trx.setVerified(false);
       }
@@ -1612,6 +1744,11 @@ public class Manager {
         tmpSession.merge();
         toBePacked.add(trx);
         currentSize += trxPackSize;
+        if (fromPending) {
+          logSize[2] += 1;
+        } else {
+          logSize[3] += 1;
+        }
       } catch (Exception e) {
         logger.warn("Process trx {} failed when generating block {}, {}.", trx.getTransactionId(),
             blockCapsule.getNum(), e.getMessage());
@@ -1628,11 +1765,14 @@ public class Manager {
     BlockCapsule capsule = new BlockCapsule(blockCapsule.getInstance());
     capsule.generatedByMyself = true;
     Metrics.histogramObserve(timer);
-    logger.info("Generate block {} success, trxs:{}, pendingCount: {}, rePushCount: {},"
-                    + " postponedCount: {}, blockSize: {} B",
-            capsule.getNum(), capsule.getTransactions().size(),
-            pendingTransactions.size(), rePushTransactions.size(), postponedTrxCount,
-            capsule.getSerializedSize());
+    logger.info("Generate block {} success, trxs:{}, before pendingCount: {}, rePushCount: {}, "
+            + "from pending: {}, rePush: {}, after pendingCount: {}, rePushCount: {}, "
+            + "postponedCount: {}, blockSize: {} B",
+        capsule.getNum(), capsule.getTransactions().size(),
+        logSize[0], logSize[1], logSize[2], logSize[3],
+        pendingTransactions.size(), rePushTransactions.size(), postponedTrxCount,
+        capsule.getSerializedSize());
+
     return capsule;
   }
 
@@ -1663,6 +1803,27 @@ public class Manager {
       }
       default:
         return false;
+    }
+  }
+
+  private boolean isExchangeTransaction(Transaction transaction) {
+    if (getDynamicPropertiesStore().allowHardenExchangeCalculation()) {
+      return false;
+    }
+    Contract contract = transaction.getRawData().getContract(0);
+    switch (contract.getType()) {
+      case ExchangeTransactionContract: {
+        return true;
+      }
+      default:
+        return false;
+    }
+  }
+
+  private void rejectExchangeTransaction(Transaction transaction) throws ContractValidateException {
+    if (isExchangeTransaction(transaction) && chainBaseManager.getForkController()
+            .pass(Parameter.ForkBlockVersionEnum.VERSION_4_8_0_1)) {
+      throw new ContractValidateException("ExchangeTransactionContract is rejected");
     }
   }
 
@@ -1714,12 +1875,20 @@ public class Manager {
 
     TransactionRetCapsule transactionRetCapsule =
         new TransactionRetCapsule(block);
+    HistoryBlockHashUtil.write(this, block);
     try {
       merkleContainer.resetCurrentMerkleTree();
       accountStateCallBack.preExecute(block);
       List<TransactionInfo> results = new ArrayList<>();
       long num = block.getNum();
       for (TransactionCapsule transactionCapsule : block.getTransactions()) {
+        rejectExchangeTransaction(transactionCapsule.getInstance());
+        if (chainBaseManager.getDynamicPropertiesStore().allowConsensusLogicOptimization()
+            && transactionCapsule.retCountIsGreatThanContractCount()) {
+          throw new BadBlockException(String.format("The result count %d of this transaction %s is "
+                  + "greater than its contract count %d", transactionCapsule.getRetCount(),
+              transactionCapsule.getTransactionId(), transactionCapsule.getContractCount()));
+        }
         transactionCapsule.setBlockNum(num);
         if (block.generatedByMyself) {
           transactionCapsule.setVerified(true);
@@ -1768,12 +1937,10 @@ public class Manager {
 
     chainBaseManager.getBalanceTraceStore().resetCurrentBlockTrace();
 
-    if (CommonParameter.getInstance().isJsonRpcFilterEnabled()) {
-      Bloom blockBloom = chainBaseManager.getSectionBloomStore()
-          .initBlockSection(transactionRetCapsule);
-      chainBaseManager.getSectionBloomStore().write(block.getNum());
-      block.setBloom(blockBloom);
-    }
+    Bloom blockBloom = chainBaseManager.getSectionBloomStore()
+        .initBlockSection(transactionRetCapsule);
+    chainBaseManager.getSectionBloomStore().write(block.getNum());
+    block.setBloom(blockBloom);
   }
 
   private void payReward(BlockCapsule block) {
@@ -1786,9 +1953,10 @@ public class Manager {
       mortgageService.payStandbyWitness();
 
       if (chainBaseManager.getDynamicPropertiesStore().supportTransactionFeePool()) {
-        long transactionFeeReward = Math
-            .floorDiv(chainBaseManager.getDynamicPropertiesStore().getTransactionFeePool(),
-                Constant.TRANSACTION_FEE_POOL_PERIOD);
+        long transactionFeeReward = floorDiv(
+            chainBaseManager.getDynamicPropertiesStore().getTransactionFeePool(),
+                Constant.TRANSACTION_FEE_POOL_PERIOD,
+            chainBaseManager.getDynamicPropertiesStore().disableJavaLangMath());
         mortgageService.payTransactionFeeReward(witnessCapsule.getAddress().toByteArray(),
             transactionFeeReward);
         chainBaseManager.getDynamicPropertiesStore().saveTransactionFeePool(
@@ -1802,9 +1970,10 @@ public class Manager {
           + chainBaseManager.getDynamicPropertiesStore().getWitnessPayPerBlock());
 
       if (chainBaseManager.getDynamicPropertiesStore().supportTransactionFeePool()) {
-        long transactionFeeReward = Math
-            .floorDiv(chainBaseManager.getDynamicPropertiesStore().getTransactionFeePool(),
-                Constant.TRANSACTION_FEE_POOL_PERIOD);
+        long transactionFeeReward = floorDiv(
+            chainBaseManager.getDynamicPropertiesStore().getTransactionFeePool(),
+                Constant.TRANSACTION_FEE_POOL_PERIOD,
+            chainBaseManager.getDynamicPropertiesStore().disableJavaLangMath());
         account.setAllowance(account.getAllowance() + transactionFeeReward);
         chainBaseManager.getDynamicPropertiesStore().saveTransactionFeePool(
             chainBaseManager.getDynamicPropertiesStore().getTransactionFeePool()
@@ -1831,6 +2000,7 @@ public class Manager {
         triggerCapsule.setTriggerName(Trigger.SOLIDITYLOG_TRIGGER_NAME);
         EventPluginLoader.getInstance().postSolidityLogTrigger(triggerCapsule);
       } else {
+        // when switch fork, block will be post to triggerCapsuleQueue, transaction may be not found
         logger.error("PostSolidityLogContractTrigger txId = {} not contains transaction.",
             triggerCapsule.getTransactionId());
       }
@@ -1896,6 +2066,10 @@ public class Manager {
         chainBaseManager.getDynamicPropertiesStore().getLatestBlockHeaderNumber()
             - revokingStore.size(),
         chainBaseManager.getDynamicPropertiesStore().getLatestSolidifiedBlockNum());
+    return this.fetchSyncBeginNumber();
+  }
+
+  public long fetchSyncBeginNumber() {
     return chainBaseManager.getDynamicPropertiesStore().getLatestBlockHeaderNumber()
         - revokingStore.size();
   }
@@ -1917,27 +2091,13 @@ public class Manager {
     return chainBaseManager.getNullifierStore();
   }
 
-  public void closeAllStore() {
-    logger.info("******** Begin to close db. ********");
-    chainBaseManager.closeAllStore();
-    validateSignService.shutdown();
-    logger.info("******** End to close db. ********");
-  }
-
-  public void closeOneStore(ITronChainBase database) {
-    logger.info("******** Begin to close {}. ********", database.getName());
-    try {
-      database.close();
-    } catch (Exception e) {
-      logger.info("Failed to close {}.", database.getName(), e);
-    } finally {
-      logger.info("******** End to close {}. ********", database.getName());
-    }
+  public int getCachedTransactionSize() {
+    return pushTransactionQueue.size() + getPendingTransactions().size()
+        + getRePushTransactions().size();
   }
 
   public boolean isTooManyPending() {
-    return getPendingTransactions().size() + getRePushTransactions().size()
-        > maxTransactionPendingSize;
+    return getCachedTransactionSize() > maxTransactionPendingSize;
   }
 
   private void preValidateTransactionSign(List<TransactionCapsule> txs)
@@ -1974,6 +2134,13 @@ public class Manager {
   public void rePush(TransactionCapsule tx) {
     if (containsTransaction(tx)) {
       return;
+    }
+
+    String ownerAddress = ByteArray.toHexString(tx.getOwnerAddress());
+    synchronized (this) {
+      if (ownerAddressSet.contains(ownerAddress)) {
+        tx.setVerified(false);
+      }
     }
 
     try {
@@ -2021,7 +2188,7 @@ public class Manager {
           .start(Args.getInstance().getEventPluginConfig());
 
       if (!eventPluginLoaded) {
-        logger.error("Failed to load eventPlugin.");
+        throw new EventException("Failed to load eventPlugin.");
       }
 
       FilterQuery eventFilter = Args.getInstance().getEventFilter();
@@ -2030,14 +2197,12 @@ public class Manager {
       }
 
     } catch (Exception e) {
-      logger.error("{}", e);
+      throw new TronError(e, TronError.ErrCode.EVENT_SUBSCRIBE_INIT);
     }
   }
 
   private void postSolidityFilter(final long oldSolidNum, final long latestSolidifiedBlockNumber) {
     if (oldSolidNum >= latestSolidifiedBlockNumber) {
-      logger.warn("Post solidity filter failed, oldSolidity: {} >= latestSolidity: {}.",
-          oldSolidNum, latestSolidifiedBlockNumber);
       return;
     }
 
@@ -2048,7 +2213,28 @@ public class Manager {
     }
   }
 
-  private void postSolidityTrigger(final long oldSolidNum, final long latestSolidifiedBlockNumber) {
+  private void postSolidityTrigger(final long latestSolidifiedBlockNumber) {
+    // solidified-mode block trigger: emit the newly-solidified blocks (never removed,
+    // since solidified blocks cannot be reorged).
+    if (eventPluginLoaded && EventPluginLoader.getInstance().isBlockLogTriggerEnable()
+        && EventPluginLoader.getInstance().isBlockLogTriggerSolidified()) {
+      for (BlockCapsule capsule : getContinuousBlockCapsule(latestSolidifiedBlockNumber)) {
+        BlockLogTriggerCapsule blockLogTriggerCapsule = new BlockLogTriggerCapsule(capsule);
+        blockLogTriggerCapsule.setLatestSolidifiedBlockNumber(latestSolidifiedBlockNumber);
+        if (!triggerCapsuleQueue.offer(blockLogTriggerCapsule)) {
+          logger.info("Too many triggers, block trigger lost: {}.", capsule.getBlockId());
+        }
+      }
+    }
+
+    // solidified-mode transaction trigger: emit transactions of the newly-solidified blocks.
+    if (eventPluginLoaded && EventPluginLoader.getInstance().isTransactionLogTriggerEnable()
+        && EventPluginLoader.getInstance().isTransactionLogTriggerSolidified()) {
+      for (BlockCapsule capsule : getContinuousBlockCapsule(latestSolidifiedBlockNumber)) {
+        processTransactionTrigger(capsule, false);
+      }
+    }
+
     if (eventPluginLoaded && EventPluginLoader.getInstance().isSolidityLogTriggerEnable()) {
       for (Long i : Args.getSolidityContractLogTriggerMap().keySet()) {
         postSolidityLogContractTrigger(i, latestSolidifiedBlockNumber);
@@ -2074,38 +2260,16 @@ public class Manager {
         }
       }
     }
-
-    if (CommonParameter.getInstance().isJsonRpcHttpSolidityNodeEnable()) {
-      postSolidityFilter(oldSolidNum, latestSolidifiedBlockNumber);
-    }
     lastUsedSolidityNum = latestSolidifiedBlockNumber;
   }
 
-  private void processTransactionTrigger(BlockCapsule newBlock) {
+  private void processTransactionTrigger(BlockCapsule newBlock, boolean removed) {
     List<TransactionCapsule> transactionCapsuleList = newBlock.getTransactions();
 
     // need to set eth compatible data from transactionInfoList
     if (EventPluginLoader.getInstance().isTransactionLogTriggerEthCompatible()
           && newBlock.getNum() != 0) {
-      TransactionInfoList transactionInfoList = TransactionInfoList.newBuilder().build();
-      TransactionInfoList.Builder transactionInfoListBuilder = TransactionInfoList.newBuilder();
-
-      try {
-        TransactionRetCapsule result = chainBaseManager.getTransactionRetStore()
-            .getTransactionInfoByBlockNum(ByteArray.fromLong(newBlock.getNum()));
-
-        if (!Objects.isNull(result) && !Objects.isNull(result.getInstance())) {
-          result.getInstance().getTransactioninfoList().forEach(
-              transactionInfoListBuilder::addTransactionInfo
-          );
-
-          transactionInfoList = transactionInfoListBuilder.build();
-        }
-      } catch (BadItemException e) {
-        logger.error("PostBlockTrigger getTransactionInfoList blockNum = {}, error is {}.",
-            newBlock.getNum(), e.getMessage());
-      }
-
+      TransactionInfoList transactionInfoList = getTransactionInfoByBlockNum(newBlock.getNum());
       if (transactionCapsuleList.size() == transactionInfoList.getTransactionInfoCount()) {
         long cumulativeEnergyUsed = 0;
         long cumulativeLogCount = 0;
@@ -2118,7 +2282,7 @@ public class Manager {
           transactionCapsule.setBlockNum(newBlock.getNum());
 
           cumulativeEnergyUsed += postTransactionTrigger(transactionCapsule, newBlock, i,
-              cumulativeEnergyUsed, cumulativeLogCount, transactionInfo, energyUnitPrice);
+              cumulativeEnergyUsed, cumulativeLogCount, transactionInfo, energyUnitPrice, removed);
 
           cumulativeLogCount += transactionInfo.getLogCount();
         }
@@ -2127,12 +2291,12 @@ public class Manager {
             newBlock.getNum(),
             "the sizes of transactionInfoList and transactionCapsuleList are not equal");
         for (TransactionCapsule e : newBlock.getTransactions()) {
-          postTransactionTrigger(e, newBlock);
+          postTransactionTrigger(e, newBlock, removed);
         }
       }
     } else {
       for (TransactionCapsule e : newBlock.getTransactions()) {
-        postTransactionTrigger(e, newBlock);
+        postTransactionTrigger(e, newBlock, removed);
       }
     }
   }
@@ -2152,8 +2316,34 @@ public class Manager {
     }
   }
 
+  // Post the FULL-stream block and logs filters for each block of the new canonical branch
+  // (oldest-first). Must be kept in sync with the FULL-filter section of blockTrigger.
+  // Solidity filters are intentionally not posted here: solidification events for these
+  // blocks arrive later, when postSolidityFilter runs against the then-canonical chain.
+  // Re-emit the per-block subscription events for a newly-applied fork branch after a chain
+  // reorg: JSON-RPC block/logs filters and event-subscribe block/transaction triggers. The
+  // fork-switch path returns before blockTrigger() runs, so without this these forward events
+  // would be lost for the re-applied blocks (contract triggers are already re-emitted during
+  // applyBlock). All emitted as forward (removed=false): these blocks are now canonical.
+  private void reApplyBlockEvents(List<KhaosBlock> newBranch) {
+    if (CommonParameter.getInstance().isJsonRpcHttpFullNodeEnable()) {
+      for (KhaosBlock khaosBlock : newBranch) {
+        BlockCapsule blockCapsule = khaosBlock.getBlk();
+        postBlockFilter(blockCapsule, false);
+        postLogsFilter(blockCapsule, false, false);
+      }
+    }
+
+    if (EventPluginLoader.getInstance().getVersion() == 0) {
+      for (KhaosBlock khaosBlock : newBranch) {
+        postBlockTrigger(khaosBlock.getBlk(), false);
+      }
+    }
+  }
+
   private void postBlockFilter(final BlockCapsule blockCapsule, boolean solidified) {
-    BlockFilterCapsule blockFilterCapsule = new BlockFilterCapsule(blockCapsule, solidified);
+    BlockFilterCapsule blockFilterCapsule =
+        new BlockFilterCapsule(blockCapsule, solidified);
     if (!filterCapsuleQueue.offer(blockFilterCapsule)) {
       logger.info("Too many filters, block filter lost: {}.", blockCapsule.getBlockId());
     }
@@ -2163,21 +2353,8 @@ public class Manager {
       boolean removed) {
     if (!blockCapsule.getTransactions().isEmpty()) {
       long blockNumber = blockCapsule.getNum();
-      List<TransactionInfo> transactionInfoList = new ArrayList<>();
-
-      try {
-        TransactionRetCapsule result = chainBaseManager.getTransactionRetStore()
-            .getTransactionInfoByBlockNum(ByteArray.fromLong(blockNumber));
-
-        if (!Objects.isNull(result) && !Objects.isNull(result.getInstance())) {
-          transactionInfoList.addAll(result.getInstance().getTransactioninfoList());
-        }
-      } catch (BadItemException e) {
-        logger.error("ProcessLogsFilter getTransactionInfoList blockNum = {}, error is {}.",
-            blockNumber, e.getMessage());
-        return;
-      }
-
+      List<TransactionInfo> transactionInfoList
+              = getTransactionInfoByBlockNum(blockNumber).getTransactionInfoList();
       LogsFilterCapsule logsFilterCapsule = new LogsFilterCapsule(blockNumber,
           blockCapsule.getBlockId().toString(), blockCapsule.getBloom(), transactionInfoList,
           solidified, removed);
@@ -2188,45 +2365,26 @@ public class Manager {
     }
   }
 
-  private void postBlockTrigger(final BlockCapsule blockCapsule) {
-    // post block and logs for jsonrpc
-    if (CommonParameter.getInstance().isJsonRpcHttpFullNodeEnable()) {
-      postBlockFilter(blockCapsule, false);
-      postLogsFilter(blockCapsule, false, false);
-    }
-
-    // process block trigger
+  // Real-time block/transaction triggers for a single block. The solidified-mode batch is
+  // handled in postSolidityTrigger (driven by solidification advancement), so here we only
+  // emit for triggers configured as non-solidified. {@code removed=true} re-emits the same
+  // trigger when the block is rolled back by a chain reorg (see reOrgBlockTrigger).
+  void postBlockTrigger(final BlockCapsule blockCapsule, boolean removed) {
     long solidityBlkNum = getDynamicPropertiesStore().getLatestSolidifiedBlockNum();
-    if (eventPluginLoaded && EventPluginLoader.getInstance().isBlockLogTriggerEnable()) {
-      List<BlockCapsule> capsuleList = new ArrayList<>();
-      if (EventPluginLoader.getInstance().isBlockLogTriggerSolidified()) {
-        capsuleList = getContinuousBlockCapsule(solidityBlkNum);
-      } else {
-        capsuleList.add(blockCapsule);
-      }
 
-      for (BlockCapsule capsule : capsuleList) {
-        BlockLogTriggerCapsule blockLogTriggerCapsule = new BlockLogTriggerCapsule(capsule);
-        blockLogTriggerCapsule.setLatestSolidifiedBlockNumber(solidityBlkNum);
-        if (!triggerCapsuleQueue.offer(blockLogTriggerCapsule)) {
-          logger.info("Too many triggers, block trigger lost: {}.", capsule.getBlockId());
-        }
+    if (eventPluginLoaded && EventPluginLoader.getInstance().isBlockLogTriggerEnable()
+        && !EventPluginLoader.getInstance().isBlockLogTriggerSolidified()) {
+      BlockLogTriggerCapsule blockLogTriggerCapsule = new BlockLogTriggerCapsule(blockCapsule);
+      blockLogTriggerCapsule.setLatestSolidifiedBlockNumber(solidityBlkNum);
+      blockLogTriggerCapsule.setRemoved(removed);
+      if (!triggerCapsuleQueue.offer(blockLogTriggerCapsule)) {
+        logger.info("Too many triggers, block trigger lost: {}.", blockCapsule.getBlockId());
       }
     }
 
-    // process transaction trigger
-    if (eventPluginLoaded && EventPluginLoader.getInstance().isTransactionLogTriggerEnable()) {
-      List<BlockCapsule> capsuleList = new ArrayList<>();
-      if (EventPluginLoader.getInstance().isTransactionLogTriggerSolidified()) {
-        capsuleList = getContinuousBlockCapsule(solidityBlkNum);
-      } else {
-        // need to reset block
-        capsuleList.add(blockCapsule);
-      }
-
-      for (BlockCapsule capsule : capsuleList) {
-        processTransactionTrigger(capsule);
-      }
+    if (eventPluginLoaded && EventPluginLoader.getInstance().isTransactionLogTriggerEnable()
+        && !EventPluginLoader.getInstance().isTransactionLogTriggerSolidified()) {
+      processTransactionTrigger(blockCapsule, removed);
     }
   }
 
@@ -2252,11 +2410,13 @@ public class Manager {
   // cumulativeEnergyUsed is the total of energy used before the current transaction
   private long postTransactionTrigger(final TransactionCapsule trxCap,
       final BlockCapsule blockCap, int index, long preCumulativeEnergyUsed,
-      long cumulativeLogCount, final TransactionInfo transactionInfo, long energyUnitPrice) {
+      long cumulativeLogCount, final TransactionInfo transactionInfo, long energyUnitPrice,
+      boolean removed) {
     TransactionLogTriggerCapsule trx = new TransactionLogTriggerCapsule(trxCap, blockCap,
         index, preCumulativeEnergyUsed, cumulativeLogCount, transactionInfo, energyUnitPrice);
     trx.setLatestSolidifiedBlockNumber(getDynamicPropertiesStore()
         .getLatestSolidifiedBlockNum());
+    trx.setRemoved(removed);
     if (!triggerCapsuleQueue.offer(trx)) {
       logger.info("Too many triggers, transaction trigger lost: {}.", trxCap.getTransactionId());
     }
@@ -2266,10 +2426,11 @@ public class Manager {
 
 
   private void postTransactionTrigger(final TransactionCapsule trxCap,
-      final BlockCapsule blockCap) {
+      final BlockCapsule blockCap, boolean removed) {
     TransactionLogTriggerCapsule trx = new TransactionLogTriggerCapsule(trxCap, blockCap);
     trx.setLatestSolidifiedBlockNumber(getDynamicPropertiesStore()
         .getLatestSolidifiedBlockNum());
+    trx.setRemoved(removed);
     if (!triggerCapsuleQueue.offer(trx)) {
       logger.info("Too many triggers, transaction trigger lost: {}.", trxCap.getTransactionId());
     }
@@ -2291,6 +2452,36 @@ public class Manager {
             getDynamicPropertiesStore().getLatestBlockHeaderHash());
       }
     }
+    clearSolidityContractTriggerCache(getHeadBlockNum());
+  }
+
+  // On a chain reorg, re-emit the block/transaction triggers of the block being erased with
+  // removed=true, so subscribers can roll back. Only real-time (non-solidified) triggers were
+  // ever emitted for this block, so postBlockTrigger(.., true) naturally no-ops in solidified
+  // mode. Called in the erase loop before eraseBlock(), so the old head is still current head.
+  private void reOrgBlockTrigger() {
+    if (eventPluginLoaded
+        && (EventPluginLoader.getInstance().isBlockLogTriggerEnable()
+        || EventPluginLoader.getInstance().isTransactionLogTriggerEnable())) {
+      logger.info("Switch fork occurred, post reOrgBlockTrigger.");
+      try {
+        BlockCapsule oldHeadBlock = chainBaseManager.getBlockById(
+            getDynamicPropertiesStore().getLatestBlockHeaderHash());
+        postBlockTrigger(oldHeadBlock, true);
+      } catch (BadItemException | ItemNotFoundException e) {
+        logger.error("Block header hash does not exist or is bad: {}.",
+            getDynamicPropertiesStore().getLatestBlockHeaderHash());
+      }
+    }
+  }
+
+  private void clearSolidityContractTriggerCache(long blockNum) {
+    if (eventPluginLoaded
+        && (EventPluginLoader.getInstance().isSolidityEventTriggerEnable()
+        || EventPluginLoader.getInstance().isSolidityLogTriggerEnable())) {
+      Args.getSolidityContractLogTriggerMap().remove(blockNum);
+      Args.getSolidityContractEventTriggerMap().remove(blockNum);
+    }
   }
 
   private void postContractTrigger(final TransactionTrace trace, boolean remove, String blockHash) {
@@ -2310,9 +2501,14 @@ public class Manager {
             .getLatestSolidifiedBlockNum());
         contractTriggerCapsule.setBlockHash(blockHash);
 
-        if (!triggerCapsuleQueue.offer(contractTriggerCapsule)) {
-          logger.info("Too many triggers, contract log trigger lost: {}.",
-              trigger.getTransactionId());
+        // Process synchronously to avoid race condition between async queue and
+        // reOrgContractTrigger cache clearing. Performance is not impacted because
+        // processTrigger() only enqueues events into the plugin's internal queue
+        // without blocking on actual I/O.
+        try {
+          contractTriggerCapsule.processTrigger();
+        } catch (Throwable throwable) {
+          logger.warn("Post contract trigger failed.", throwable);
         }
       }
     }
@@ -2398,8 +2594,10 @@ public class Manager {
         }
         transactionCount += trx.getTransactionIds().size();
         long blockNum = trx.getNum();
-        maxBlock = Math.max(maxBlock, blockNum);
-        minBlock = Math.min(minBlock, blockNum);
+        maxBlock = max(maxBlock, blockNum,
+            chainBaseManager.getDynamicPropertiesStore().disableJavaLangMath());
+        minBlock = min(minBlock, blockNum,
+            chainBaseManager.getDynamicPropertiesStore().disableJavaLangMath());
         item.setBlockNum(blockNum);
         trx.getTransactionIds().forEach(
             tid -> chainBaseManager.getTransactionStore().put(Hex.decode(tid), item));
@@ -2420,6 +2618,51 @@ public class Manager {
 
   private boolean isBlockWaitingLock() {
     return blockWaitLock.get() > NO_BLOCK_WAITING_LOCK;
+  }
+
+  public TransactionInfoList getTransactionInfoByBlockNum(long blockNum) {
+    TransactionInfoList.Builder transactionInfoList = TransactionInfoList.newBuilder();
+
+    try {
+      TransactionRetCapsule result = getTransactionRetStore()
+              .getTransactionInfoByBlockNum(ByteArray.fromLong(blockNum));
+
+      if (!Objects.isNull(result) && !Objects.isNull(result.getInstance())) {
+        result.getInstance().getTransactioninfoList().forEach(
+            transactionInfo -> transactionInfoList.addTransactionInfo(transactionInfo)
+        );
+      } else {
+        Protocol.Block block = chainBaseManager.getBlockByNum(blockNum).getInstance();
+
+        if (block != null) {
+          List<Transaction> listTransaction = block.getTransactionsList();
+          for (Transaction transaction : listTransaction) {
+            TransactionInfoCapsule transactionInfoCapsule = getTransactionHistoryStore()
+                    .get(Sha256Hash.hash(CommonParameter.getInstance()
+                            .isECKeyCryptoEngine(), transaction.getRawData().toByteArray()));
+
+            if (transactionInfoCapsule != null) {
+              transactionInfoList.addTransactionInfo(transactionInfoCapsule.getInstance());
+            }
+          }
+        }
+      }
+    } catch (BadItemException | ItemNotFoundException e) {
+      logger.warn(e.getMessage());
+    }
+
+    return transactionInfoList.build();
+  }
+
+  public void close() {
+    stopRePushThread();
+    stopRePushTriggerThread();
+    EventPluginLoader.getInstance().stopPlugin();
+    stopFilterProcessThread();
+    stopValidateSignThread();
+    chainBaseManager.shutdown();
+    revokingStore.shutdown();
+    session.reset();
   }
 
   private static class ValidateSignTask implements Callable<Boolean> {

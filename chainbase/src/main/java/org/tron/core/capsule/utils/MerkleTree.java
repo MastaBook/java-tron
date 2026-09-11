@@ -11,33 +11,22 @@ import org.tron.common.utils.Sha256Hash;
 @Getter
 public class MerkleTree {
 
-  private static volatile MerkleTree instance;
   private List<Sha256Hash> hashList;
   private List<Leaf> leaves;
   private Leaf root;
 
-  public static MerkleTree getInstance() {
-    if (instance == null) {
-      synchronized (MerkleTree.class) {
-        if (instance == null) {
-          instance = new MerkleTree();
-        }
-      }
-    }
-    return instance;
-  }
-
-  public MerkleTree createTree(List<Sha256Hash> hashList) {
-    this.leaves = new ArrayList<>();
-    this.hashList = hashList;
-    List<Leaf> leaves = createLeaves(hashList);
+  public static MerkleTree build(List<Sha256Hash> hashList) {
+    MerkleTree tree = new MerkleTree();
+    tree.hashList = hashList;
+    tree.leaves = new ArrayList<>();
+    List<Leaf> leaves = tree.createLeaves(hashList);
 
     while (leaves.size() > 1) {
-      leaves = createParentLeaves(leaves);
+      leaves = tree.createParentLeaves(leaves);
     }
 
-    this.root = leaves.get(0);
-    return this;
+    tree.root = leaves.get(0);
+    return tree;
   }
 
   private List<Leaf> createParentLeaves(List<Leaf> leaves) {

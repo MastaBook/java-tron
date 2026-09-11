@@ -1,11 +1,16 @@
 package org.tron.core.vm.repository;
 
-import static java.lang.Long.max;
+import static org.tron.common.math.Maths.addExact;
+import static org.tron.common.math.Maths.max;
+import static org.tron.common.math.Maths.round;
 import static org.tron.core.config.Parameter.ChainConstant.BLOCK_PRODUCED_INTERVAL;
 import static org.tron.core.config.Parameter.ChainConstant.TRX_PRECISION;
 
+import com.google.common.collect.HashBasedTable;
 import com.google.protobuf.ByteString;
+import java.math.BigInteger;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Optional;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
@@ -13,6 +18,7 @@ import org.apache.commons.lang3.tuple.Pair;
 import org.bouncycastle.util.Strings;
 import org.bouncycastle.util.encoders.Hex;
 import org.tron.common.crypto.Hash;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.common.runtime.vm.DataWord;
 import org.tron.common.utils.ByteArray;
@@ -131,6 +137,9 @@ public class RepositoryImpl implements Repository {
   private final HashMap<Key, Value<Votes>> votesCache = new HashMap<>();
   private final HashMap<Key, Value<byte[]>> delegationCache = new HashMap<>();
   private final HashMap<Key, Value<DelegatedResourceAccountIndex>> delegatedResourceAccountIndexCache = new HashMap<>();
+  private final HashBasedTable<Key, Key, Value<byte[]>> transientStorage = HashBasedTable.create();
+  private final HashSet<Key> newContractCache = new HashSet<>();
+  private final HashSet<Key> selfDestructCache = new HashSet<>();
 
   public static void removeLruCache(byte[] address) {
   }
@@ -185,7 +194,7 @@ public class RepositoryImpl implements Repository {
 
     long newEnergyUsage = recover(energyUsage, latestConsumeTime, now, windowSize);
 
-    return max(energyLimit - newEnergyUsage, 0); // us
+    return max(energyLimit - newEnergyUsage, 0, VMConfig.disableJavaLangMath()); // us
   }
 
   @Override
@@ -217,7 +226,7 @@ public class RepositoryImpl implements Repository {
     long totalEnergyLimit = getDynamicPropertiesStore().getTotalEnergyCurrentLimit();
     long totalEnergyWeight = getTotalEnergyWeight();
 
-    long balance = (long) ((double) newEnergyUsage * totalEnergyWeight / totalEnergyLimit * TRX_PRECISION);
+    long balance = usageToBalance(newEnergyUsage, totalEnergyWeight, totalEnergyLimit);
 
     return Pair.of(balance, restoreSlots * BLOCK_PRODUCED_INTERVAL / 1_000);
   }
@@ -240,9 +249,20 @@ public class RepositoryImpl implements Repository {
     long totalNetLimit = getDynamicPropertiesStore().getTotalNetLimit();
     long totalNetWeight = getTotalNetWeight();
 
-    long balance = (long) ((double) newNetUsage * totalNetWeight / totalNetLimit * TRX_PRECISION);
+    long balance = usageToBalance(newNetUsage, totalNetWeight, totalNetLimit);
 
     return Pair.of(balance, restoreSlots * BLOCK_PRODUCED_INTERVAL / 1_000);
+  }
+
+  private long usageToBalance(long usage, long totalWeight, long totalLimit) {
+    if (hardenResourceCalculation()) {
+      return BigInteger.valueOf(usage)
+          .multiply(BigInteger.valueOf(totalWeight))
+          .multiply(BigInteger.valueOf(TRX_PRECISION))
+          .divide(BigInteger.valueOf(totalLimit))
+          .longValueExact();
+    }
+    return (long) ((double) usage * totalWeight / totalLimit * TRX_PRECISION);
   }
 
   @Override
@@ -442,6 +462,27 @@ public class RepositoryImpl implements Repository {
     return delegatedResourceAccountIndexCapsule;
   }
 
+  public byte[] getTransientStorageValue(byte[] address, byte[] key) {
+    Key cacheAddress = new Key(address);
+    Key cacheKey = new Key(key);
+    if (transientStorage.contains(cacheAddress, cacheKey)) {
+      return transientStorage.get(cacheAddress, cacheKey).getValue();
+    }
+
+    byte[] value;
+    if (parent != null) {
+      value = parent.getTransientStorageValue(address, key);
+    } else {
+      value = null;
+    }
+
+    if (value != null) {
+      transientStorage.put(cacheAddress, cacheKey, Value.create(value));
+    }
+
+    return value;
+  }
+
 
   @Override
   public void deleteContract(byte[] address) {
@@ -454,6 +495,7 @@ public class RepositoryImpl implements Repository {
   public void createContract(byte[] address, ContractCapsule contractCapsule) {
     contractCache.put(Key.create(address),
         Value.create(contractCapsule, Type.CREATE));
+    putNewContract(address);
   }
 
   @Override
@@ -506,6 +548,52 @@ public class RepositoryImpl implements Repository {
   public void updateContractState(byte[] address, ContractStateCapsule contractStateCapsule) {
     contractStateCache.put(Key.create(address),
         Value.create(contractStateCapsule, Type.DIRTY));
+  }
+
+  @Override
+  public void putNewContract(byte[] address) {
+    newContractCache.add(Key.create(address));
+  }
+
+  @Override
+  public boolean isNewContract(byte[] address) {
+    Key key = Key.create(address);
+    if (newContractCache.contains(key)) {
+      return true;
+    }
+
+    if (parent != null) {
+      boolean isNew = parent.isNewContract(address);
+      if (isNew) {
+        newContractCache.add(key);
+      }
+      return isNew;
+    } else {
+      return false;
+    }
+  }
+
+  @Override
+  public void markSelfDestruct(byte[] address) {
+    selfDestructCache.add(Key.create(address));
+  }
+
+  @Override
+  public boolean isSelfDestructed(byte[] address) {
+    Key key = Key.create(address);
+    if (selfDestructCache.contains(key)) {
+      return true;
+    }
+
+    if (parent != null) {
+      boolean isSelfDestructed = parent.isSelfDestructed(address);
+      if (isSelfDestructed) {
+        selfDestructCache.add(key);
+      }
+      return isSelfDestructed;
+    } else {
+      return false;
+    }
   }
 
   @Override
@@ -563,6 +651,11 @@ public class RepositoryImpl implements Repository {
       byte[] word, DelegatedResourceAccountIndexCapsule delegatedResourceAccountIndexCapsule) {
     delegatedResourceAccountIndexCache.put(
         Key.create(word), Value.create(delegatedResourceAccountIndexCapsule, Type.DIRTY));
+  }
+
+  @Override
+  public void updateTransientStorageValue(byte[] address, byte[] key, byte[] value) {
+    transientStorage.put(Key.create(address), Key.create(key), Value.create(value, Type.DIRTY));
   }
 
   @Override
@@ -681,7 +774,7 @@ public class RepositoryImpl implements Repository {
           StringUtil.createReadableString(accountCapsule.createDbKey())
               + " insufficient balance");
     }
-    accountCapsule.setBalance(Math.addExact(balance, value));
+    accountCapsule.setBalance(addExact(balance, value, VMConfig.disableJavaLangMath()));
     Key key = Key.create(address);
     accountCache.put(key, Value.create(accountCapsule,
          accountCache.get(key).getType().addType(Type.DIRTY)));
@@ -709,6 +802,9 @@ public class RepositoryImpl implements Repository {
     commitVotesCache(repository);
     commitDelegationCache(repository);
     commitDelegatedResourceAccountIndexCache(repository);
+    commitTransientStorage(repository);
+    commitNewContractCache(repository);
+    commitSelfDestructCache(repository);
   }
 
   @Override
@@ -765,6 +861,11 @@ public class RepositoryImpl implements Repository {
   @Override
   public void putDelegatedResourceAccountIndex(Key key, Value value) {
     delegatedResourceAccountIndexCache.put(key, value);
+  }
+
+  @Override
+  public void putTransientStorageValue(Key address, Key key, Value value) {
+    transientStorage.put(address, key, value);
   }
 
   @Override
@@ -833,15 +934,26 @@ public class RepositoryImpl implements Repository {
   }
 
   private long increase(long lastUsage, long usage, long lastTime, long now, long windowSize) {
-    long averageLastUsage = divideCeil(lastUsage * precision, windowSize);
-    long averageUsage = divideCeil(usage * precision, windowSize);
+    long averageLastUsage;
+    long averageUsage;
+    if (hardenResourceCalculation()) {
+      BigInteger biPrecision = BigInteger.valueOf(precision);
+      BigInteger biWindowSize = BigInteger.valueOf(windowSize);
+      averageLastUsage = divideCeilExact(
+          BigInteger.valueOf(lastUsage).multiply(biPrecision), biWindowSize);
+      averageUsage = divideCeilExact(
+          BigInteger.valueOf(usage).multiply(biPrecision), biWindowSize);
+    } else {
+      averageLastUsage = divideCeil(lastUsage * precision, windowSize);
+      averageUsage = divideCeil(usage * precision, windowSize);
+    }
 
     if (lastTime != now) {
       assert now > lastTime;
       if (lastTime + windowSize > now) {
         long delta = now - lastTime;
         double decay = (windowSize - delta) / (double) windowSize;
-        averageLastUsage = Math.round(averageLastUsage * decay);
+        averageLastUsage = round(averageLastUsage * decay, VMConfig.disableJavaLangMath());
       } else {
         averageLastUsage = 0;
       }
@@ -854,21 +966,46 @@ public class RepositoryImpl implements Repository {
     return (numerator / denominator) + ((numerator % denominator) > 0 ? 1 : 0);
   }
 
+  private long divideCeilExact(BigInteger numerator, BigInteger denominator) {
+    BigInteger[] divRem = numerator.divideAndRemainder(denominator);
+    long result = divRem[0].longValueExact();
+    if (divRem[1].signum() > 0) {
+      result = StrictMathWrapper.addExact(result, 1);
+    }
+    return result;
+  }
+
   private long getUsage(long usage, long windowSize) {
+    if (hardenResourceCalculation()) {
+      return BigInteger.valueOf(usage)
+          .multiply(BigInteger.valueOf(windowSize))
+          .divide(BigInteger.valueOf(precision))
+          .longValueExact();
+    }
     return usage * windowSize / precision;
+  }
+
+  private boolean hardenResourceCalculation() {
+    return VMConfig.allowHardenResourceCalculation();
   }
 
   public long calculateGlobalEnergyLimit(AccountCapsule accountCapsule) {
     long frozeBalance = accountCapsule.getAllFrozenBalanceForEnergy();
-    if (frozeBalance < 1_000_000L) {
+    if (frozeBalance < TRX_PRECISION) {
       return 0;
     }
-    long energyWeight = frozeBalance / 1_000_000L;
+    long energyWeight = frozeBalance / TRX_PRECISION;
     long totalEnergyLimit = getDynamicPropertiesStore().getTotalEnergyCurrentLimit();
     long totalEnergyWeight = getDynamicPropertiesStore().getTotalEnergyWeight();
 
     assert totalEnergyWeight > 0;
 
+    if (hardenResourceCalculation()) {
+      return BigInteger.valueOf(energyWeight)
+          .multiply(BigInteger.valueOf(totalEnergyLimit))
+          .divide(BigInteger.valueOf(totalEnergyWeight))
+          .longValueExact();
+    }
     return (long) (energyWeight * ((double) totalEnergyLimit / totalEnergyWeight));
   }
 
@@ -1011,6 +1148,29 @@ public class RepositoryImpl implements Repository {
         }
       }
     }));
+  }
+
+  public void commitTransientStorage(Repository deposit) {
+    if (deposit != null) {
+      transientStorage.cellSet().forEach(cell -> {
+        if (cell.getValue().getType().isDirty() || cell.getValue().getType().isCreate()) {
+          deposit.putTransientStorageValue(
+              cell.getRowKey(), cell.getColumnKey(), cell.getValue());
+        }
+      });
+    }
+  }
+
+  public void commitNewContractCache(Repository deposit) {
+    if (deposit != null) {
+      newContractCache.forEach(key -> deposit.putNewContract(key.getData()));
+    }
+  }
+
+  private void commitSelfDestructCache(Repository deposit) {
+    if (deposit != null) {
+      selfDestructCache.forEach(key -> deposit.markSelfDestruct(key.getData()));
+    }
   }
 
   /**

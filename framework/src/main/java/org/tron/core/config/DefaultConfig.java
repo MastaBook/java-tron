@@ -1,21 +1,15 @@
 package org.tron.core.config;
 
-import com.alibaba.fastjson.parser.ParserConfig;
 import lombok.extern.slf4j.Slf4j;
 import org.rocksdb.RocksDB;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Conditional;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
 import org.tron.common.utils.StorageUtils;
 import org.tron.core.config.args.Args;
-import org.tron.core.db.RecentTransactionStore;
 import org.tron.core.db.RevokingDatabase;
-import org.tron.core.db.TransactionCache;
-import org.tron.core.db.backup.BackupRocksDBAspect;
-import org.tron.core.db.backup.NeedBeanCondition;
 import org.tron.core.db2.core.SnapshotManager;
 import org.tron.core.services.interfaceOnPBFT.RpcApiServiceOnPBFT;
 import org.tron.core.services.interfaceOnPBFT.http.PBFT.HttpApiOnPBFTService;
@@ -29,7 +23,6 @@ public class DefaultConfig {
 
   static {
     RocksDB.loadLibrary();
-    ParserConfig.getGlobalInstance().setSafeMode(true);
   }
 
   @Autowired
@@ -39,10 +32,9 @@ public class DefaultConfig {
   public CommonConfig commonConfig;
 
   public DefaultConfig() {
-    Thread.setDefaultUncaughtExceptionHandler((t, e) -> logger.error("Uncaught exception", e));
   }
 
-  @Bean
+  @Bean(destroyMethod = "")
   public RevokingDatabase revokingDatabase() {
     try {
       return new SnapshotManager(
@@ -93,14 +85,4 @@ public class DefaultConfig {
     return null;
   }
 
-  @Bean
-  public TransactionCache transactionCache() {
-    return new TransactionCache("trans-cache", appCtx.getBean(RecentTransactionStore.class));
-  }
-
-  @Bean
-  @Conditional(NeedBeanCondition.class)
-  public BackupRocksDBAspect backupRocksDBAspect() {
-    return new BackupRocksDBAspect();
-  }
 }

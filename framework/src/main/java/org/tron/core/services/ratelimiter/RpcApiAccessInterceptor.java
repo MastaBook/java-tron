@@ -6,13 +6,11 @@ import io.grpc.ServerCall.Listener;
 import io.grpc.ServerCallHandler;
 import io.grpc.ServerInterceptor;
 import io.grpc.Status;
-import io.prometheus.client.Histogram;
 import java.util.List;
+import java.util.Locale;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.tron.common.parameter.CommonParameter;
-import org.tron.common.prometheus.MetricKeys;
-import org.tron.common.prometheus.Metrics;
 
 @Slf4j
 @Component
@@ -32,11 +30,7 @@ public class RpcApiAccessInterceptor implements ServerInterceptor {
         return new ServerCall.Listener<ReqT>() {};
 
       } else {
-        Histogram.Timer requestTimer = Metrics.histogramStartTimer(
-            MetricKeys.Histogram.GRPC_SERVICE_LATENCY, endpoint);
-        Listener<ReqT> res = next.startCall(call, headers);
-        Metrics.histogramObserve(requestTimer);
-        return res;
+        return next.startCall(call, headers);
       }
     } catch (Exception e) {
       logger.error("check rpc api access Error: {}", e.getMessage());
@@ -50,7 +44,7 @@ public class RpcApiAccessInterceptor implements ServerInterceptor {
     try {
       List<String> disabledApiList = CommonParameter.getInstance().getDisabledApiList();
       if (!disabledApiList.isEmpty()) {
-        disabled = disabledApiList.contains(endpoint.split("/")[1].toLowerCase());
+        disabled = disabledApiList.contains(endpoint.split("/")[1].toLowerCase(Locale.ROOT));
       }
     } catch (Exception e) {
       logger.error("check isDisabled except, endpoint={}, error is {}", endpoint, e.getMessage());

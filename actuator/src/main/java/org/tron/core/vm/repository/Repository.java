@@ -41,6 +41,8 @@ public interface Repository {
 
   DelegatedResourceAccountIndexCapsule getDelegatedResourceAccountIndex(byte[] key);
 
+  byte[] getTransientStorageValue(byte[] address, byte[] key);
+
   void deleteContract(byte[] address);
 
   void createContract(byte[] address, ContractCapsule contractCapsule);
@@ -52,6 +54,14 @@ public interface Repository {
   void updateContract(byte[] address, ContractCapsule contractCapsule);
 
   void updateContractState(byte[] address, ContractStateCapsule contractStateCapsule);
+
+  void putNewContract(byte[] address);
+
+  boolean isNewContract(byte[] address);
+
+  void markSelfDestruct(byte[] address);
+
+  boolean isSelfDestructed(byte[] address);
 
   void updateAccount(byte[] address, AccountCapsule accountCapsule);
 
@@ -70,6 +80,8 @@ public interface Repository {
   void updateDelegation(byte[] word, BytesCapsule bytesCapsule);
 
   void updateDelegatedResourceAccountIndex(byte[] word, DelegatedResourceAccountIndexCapsule delegatedResourceAccountIndexCapsule);
+
+  void updateTransientStorageValue(byte[] address, byte[] key, byte[] value);
 
   void saveCode(byte[] address, byte[] code);
 
@@ -112,6 +124,8 @@ public interface Repository {
   void putDelegation(Key key, Value value);
 
   void putDelegatedResourceAccountIndex(Key key, Value value);
+
+  void putTransientStorageValue(Key address, Key key, Value value);
 
   long addTokenBalance(byte[] address, byte[] tokenId, long value);
 

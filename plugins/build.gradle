@@ -5,9 +5,6 @@ plugins {
 apply plugin: 'application'
 apply plugin: 'checkstyle'
 
-jacoco {
-    toolVersion = "0.8.4"
-}
 def versions = [
         checkstyle: '8.7',
 ]
@@ -23,20 +20,56 @@ configurations.getByName('checkstyleConfig') {
     transitive = false
 }
 
+sourceSets {
+    main {
+        java.srcDirs = rootProject.archInfo.sourceSets.main.java.srcDirs
+    }
+    test {
+        java.srcDirs = rootProject.archInfo.sourceSets.test.java.srcDirs
+    }
+}
+
 dependencies {
     //local libraries
-    compile fileTree(dir: 'libs', include: '*.jar')
-    testCompile group: 'junit', name: 'junit', version: '4.13.2'
-    testCompile group: 'org.mockito', name: 'mockito-core', version: '2.13.0'
-    testCompile group: 'org.hamcrest', name: 'hamcrest-junit', version: '1.0.0.1'
-    compile group: 'info.picocli', name: 'picocli', version: '4.6.3'
-    compile group: 'com.typesafe', name: 'config', version: '1.3.2'
-    compile group: 'me.tongfei', name: 'progressbar', version: '0.9.3'
-    compile group: 'org.bouncycastle', name: 'bcprov-jdk15on', version: '1.69'
-    compile group: 'org.rocksdb', name: 'rocksdbjni', version: '5.15.10'
-    compile 'io.github.tronprotocol:leveldbjni-all:1.18.2'
-    compile 'io.github.tronprotocol:leveldb:1.18.2'
-    compile project(":protocol")
+    implementation fileTree(dir: 'libs', include: '*.jar')
+    testImplementation project(":framework")
+    testImplementation project(":framework").sourceSets.test.output
+    implementation(project(":crypto")) {
+        exclude group: 'io.github.tronprotocol', module: 'libp2p'
+        exclude group: 'io.prometheus'
+        exclude group: 'org.aspectj'
+        exclude group: 'org.apache.httpcomponents'
+        // x86 declares io.github.tronprotocol:leveldbjni-all:1.18.2 below;
+        // :crypto -> :common -> :platform also transitively pulls
+        // org.fusesource.leveldbjni:leveldbjni-all:1.8. Both jars carry
+        // org/iq80/leveldb/Options.class and the fat jar's last-write-wins
+        // merge can leave the 1.8 copy, which lacks Options.maxBatchSize(int)
+        // and breaks `db archive` at runtime. Drop the 1.8 transitive on x86
+        // only; ARM64 has a single copy via :platform direct and no conflict.
+        if (!rootProject.archInfo.isArm64) {
+            exclude group: 'org.fusesource.leveldbjni', module: 'leveldbjni-all'
+        }
+    }
+    implementation group: 'info.picocli', name: 'picocli', version: '4.6.3'
+    implementation group: 'com.typesafe', name: 'config', version: '1.3.2'
+    implementation group: 'me.tongfei', name: 'progressbar', version: '0.9.3'
+    implementation group: 'org.bouncycastle', name: 'bcprov-jdk18on', version: '1.84'
+    if (rootProject.archInfo.isArm64) {
+        testRuntimeOnly group: 'org.fusesource.hawtjni', name: 'hawtjni-runtime', version: '1.18' // for test
+        implementation project(":platform")
+    } else {
+        implementation project(":platform"), {
+            // Only leveldbjni-all is excluded; the io.github.tronprotocol
+            // 1.18.2 fork below is the version we want on x86. zksnark-java-sdk
+            // and commons-io are intentionally kept (the plugins test runtime
+            // needs both via :crypto -> :common -> :platform and the duplicate
+            // resolution dedups to one copy).
+            exclude(group: 'org.fusesource.leveldbjni', module: 'leveldbjni-all')
+        }
+        implementation 'io.github.tronprotocol:leveldbjni-all:1.18.2'
+        implementation 'io.github.tronprotocol:leveldb:1.18.2'
+    }
+    implementation project(":protocol")
 }
 
 check.dependsOn 'lint'
@@ -44,6 +77,7 @@ check.dependsOn 'lint'
 checkstyle {
     toolVersion = "${versions.checkstyle}"
     configFile = file("../framework/config/checkstyle/checkStyleAll.xml")
+    maxWarnings = 0
 }
 
 checkstyleMain {
@@ -75,9 +109,21 @@ test {
     testLogging {
         exceptionFormat = 'full'
     }
+    maxParallelForks = Runtime.runtime.availableProcessors().intdiv(2) ?: 1
     jacoco {
-        destinationFile = file("$buildDir/jacoco/jacocoTest.exec")
+        destinationFile = file("../framework/build/jacoco/jacocoTest1.exec")
         classDumpDir = file("$buildDir/jacoco/classpathdumps")
+    }
+
+    if (rootProject.archInfo.isArm64) {
+        exclude 'org/tron/plugins/leveldb/**'
+        filter {
+            excludeTestsMatching '*.*leveldb*'
+            excludeTestsMatching '*.*Leveldb*'
+            excludeTestsMatching '*.*LevelDB*'
+            excludeTestsMatching '*.*LevelDb*'
+            excludeTestsMatching '*.*Archive*'
+        }
     }
 }
 
@@ -87,7 +133,7 @@ jacocoTestReport {
         csv.enabled false
         html.destination file("${buildDir}/jacocoHtml")
     }
-    executionData.from = 'build/jacoco/jacocoTest.exec'
+    getExecutionData().setFrom(fileTree('../framework/build/jacoco').include("**.exec"))
 }
 
 def binaryRelease(taskName, jarName, mainClass) {
@@ -97,9 +143,15 @@ def binaryRelease(taskName, jarName, mainClass) {
         from(sourceSets.main.output) {
             include "/**"
         }
-
+        // Fat jar zips up runtimeClasspath, which includes the jar outputs of
+        // every project dependency. Declare them all explicitly so Gradle does
+        // not warn about implicit_dependency and disable execution optimizations
+        // (and so partial / parallel builds cannot run binaryRelease before the
+        // dependency jars exist).
+        dependsOn (project(':protocol').jar, project(':platform').jar,
+                project(':crypto').jar, project(':common').jar) // explicit_dependency
         from {
-            configurations.compile.collect {
+            configurations.runtimeClasspath.collect { // https://docs.gradle.org/current/userguide/upgrading_version_6.html#changes_6.3
                 it.isDirectory() ? it : zipTree(it)
             }
         }
@@ -120,7 +172,7 @@ def createScript(project, mainClass, name) {
         outputDir = new File(project.buildDir, 'scripts')
         mainClassName = mainClass
         applicationName = name
-        classpath = project.tasks[JavaPlugin.JAR_TASK_NAME].outputs.files + project.configurations.runtime
+        classpath = project.tasks[JavaPlugin.JAR_TASK_NAME].outputs.files + project.configurations.runtimeClasspath
     }
     project.tasks[name].dependsOn(project.jar)
     project.applicationDistribution.with {
@@ -130,7 +182,7 @@ def createScript(project, mainClass, name) {
         }
     }
 }
-applicationDistribution.from("../gradle/java-tron.vmoptions") {
+applicationDistribution.from(rootProject.archInfo.VMOptions) {
     into "bin"
 }
 createScript(project, 'org.tron.plugins.ArchiveManifest', 'ArchiveManifest')

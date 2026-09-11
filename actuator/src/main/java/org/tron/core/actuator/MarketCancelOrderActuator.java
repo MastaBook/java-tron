@@ -23,7 +23,6 @@ import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import java.util.Objects;
 import lombok.extern.slf4j.Slf4j;
-import org.tron.common.utils.Commons;
 import org.tron.common.utils.DecodeUtil;
 import org.tron.core.capsule.AccountCapsule;
 import org.tron.core.capsule.MarketOrderCapsule;
@@ -44,7 +43,6 @@ import org.tron.core.store.MarketPairToPriceStore;
 import org.tron.protos.Protocol.MarketOrder.State;
 import org.tron.protos.Protocol.Transaction.Contract.ContractType;
 import org.tron.protos.Protocol.Transaction.Result.code;
-import org.tron.protos.contract.AssetIssueContractOuterClass.AssetIssueContract;
 import org.tron.protos.contract.MarketContract.MarketCancelOrderContract;
 
 @Slf4j(topic = "actuator")
@@ -100,7 +98,7 @@ public class MarketCancelOrderActuator extends AbstractActuator {
       if (dynamicStore.supportBlackHoleOptimization()) {
         dynamicStore.burnTrx(fee);
       } else {
-        Commons.adjustBalance(accountStore, accountStore.getBlackhole(), fee);
+        adjustBalance(accountStore, accountStore.getBlackhole(), fee);
       }
       // 1. return balance and token
       MarketUtils
@@ -222,7 +220,7 @@ public class MarketCancelOrderActuator extends AbstractActuator {
 
   @Override
   public ByteString getOwnerAddress() throws InvalidProtocolBufferException {
-    return any.unpack(AssetIssueContract.class).getOwnerAddress();
+    return any.unpack(MarketCancelOrderContract.class).getOwnerAddress();
   }
 
   @Override

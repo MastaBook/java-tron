@@ -3,7 +3,9 @@ package org.tron.core.db.common.iterator;
 import java.io.IOException;
 import java.util.Map.Entry;
 import java.util.NoSuchElementException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import lombok.extern.slf4j.Slf4j;
+import org.rocksdb.ReadOptions;
 import org.rocksdb.RocksIterator;
 
 
@@ -13,20 +15,25 @@ public final class RockStoreIterator implements DBIterator {
   private final RocksIterator dbIterator;
   private boolean first = true;
 
-  private boolean valid = true;
+  private final AtomicBoolean close = new AtomicBoolean(false);
+  private final ReadOptions readOptions;
 
-  public RockStoreIterator(RocksIterator dbIterator) {
+  public RockStoreIterator(RocksIterator dbIterator, ReadOptions readOptions) {
+    this.readOptions = readOptions;
     this.dbIterator = dbIterator;
   }
 
   @Override
   public void close() throws IOException {
-    dbIterator.close();
+    if (close.compareAndSet(false, true)) {
+      readOptions.close();
+      dbIterator.close();
+    }
   }
 
   @Override
   public boolean hasNext() {
-    if (!valid) {
+    if (close.get()) {
       return false;
     }
     boolean hasNext = false;
@@ -37,15 +44,14 @@ public final class RockStoreIterator implements DBIterator {
         first = false;
       }
       if (!(hasNext = dbIterator.isValid())) { // false is last item
-        dbIterator.close();
-        valid = false;
+        close();
       }
     } catch (Exception e) {
       logger.error(e.getMessage(), e);
       try {
-        dbIterator.close();
+        close();
       } catch (Exception e1) {
-        logger.error(e.getMessage(), e);
+        logger.error(e1.getMessage(), e1);
       }
     }
     return hasNext;
@@ -53,7 +59,7 @@ public final class RockStoreIterator implements DBIterator {
 
   @Override
   public Entry<byte[], byte[]> next() {
-    if (!valid) {
+    if (close.get()) {
       throw new NoSuchElementException();
     }
     byte[] key = dbIterator.key();
@@ -75,5 +81,56 @@ public final class RockStoreIterator implements DBIterator {
         throw new UnsupportedOperationException();
       }
     };
+  }
+
+  @Override
+  public void remove() {
+    throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public void seek(byte[] key) {
+    checkState();
+    dbIterator.seek(key);
+    this.first = false;
+  }
+
+  @Override
+  public void seekToFirst() {
+    checkState();
+    dbIterator.seekToFirst();
+    this.first = false;
+  }
+
+  @Override
+  public void seekToLast() {
+    checkState();
+    dbIterator.seekToLast();
+    this.first = false;
+  }
+
+  @Override
+  public boolean valid() {
+    checkState();
+    return dbIterator.isValid();
+  }
+
+  @Override
+  public byte[] getKey() {
+    checkValid();
+    return dbIterator.key();
+  }
+
+  @Override
+  public byte[] getValue() {
+    checkValid();
+    return dbIterator.value();
+  }
+
+  @Override
+  public void checkState() {
+    if (close.get()) {
+      throw new IllegalStateException("iterator has been closed");
+    }
   }
 }

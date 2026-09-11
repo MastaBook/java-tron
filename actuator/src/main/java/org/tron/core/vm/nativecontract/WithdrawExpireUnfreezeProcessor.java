@@ -17,6 +17,7 @@ import org.tron.core.exception.ContractValidateException;
 import org.tron.core.store.DynamicPropertiesStore;
 import org.tron.core.vm.nativecontract.param.WithdrawExpireUnfreezeParam;
 import org.tron.core.vm.repository.Repository;
+import org.tron.core.vm.utils.MUtil;
 import org.tron.protos.Protocol;
 
 @Slf4j(topic = "VMProcessor")
@@ -52,6 +53,10 @@ public class WithdrawExpireUnfreezeProcessor {
       logger.debug(e.getMessage(), e);
       throw new ContractValidateException(e.getMessage());
     }
+
+    if (accountCapsule.hasInvalidDelegatedV2()) {
+      MUtil.checkCPUTimeForInvalidDelegatedV2Balance();
+    }
   }
 
   private long getTotalWithdrawUnfreeze(List<Protocol.Account.UnFreezeV2> unfrozenV2List, long now) {
@@ -60,8 +65,8 @@ public class WithdrawExpireUnfreezeProcessor {
   }
 
   private List<Protocol.Account.UnFreezeV2> getTotalWithdrawList(List<Protocol.Account.UnFreezeV2> unfrozenV2List, long now) {
-    return unfrozenV2List.stream().filter(unfrozenV2 -> (unfrozenV2.getUnfreezeAmount() > 0
-        && unfrozenV2.getUnfreezeExpireTime() <= now)).collect(Collectors.toList());
+    return unfrozenV2List.stream().filter(unfrozenV2 -> unfrozenV2.getUnfreezeExpireTime() <= now)
+        .collect(Collectors.toList());
   }
 
   public long execute(WithdrawExpireUnfreezeParam param, Repository repo) throws ContractExeException {

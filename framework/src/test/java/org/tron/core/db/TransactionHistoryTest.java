@@ -6,8 +6,8 @@ import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.tron.common.BaseTest;
+import org.tron.common.TestConstants;
 import org.tron.common.utils.ByteArray;
-import org.tron.core.Constant;
 import org.tron.core.capsule.TransactionInfoCapsule;
 import org.tron.core.config.args.Args;
 import org.tron.core.exception.BadItemException;
@@ -17,21 +17,18 @@ public class TransactionHistoryTest extends BaseTest {
 
   private static final byte[] transactionId = TransactionStoreTest.randomBytes(32);
   private static String dbDirectory = "db_TransactionHistoryStore_test";
-  private static String indexDirectory = "index_TransactionHistoryStore_test";
   @Resource
   private TransactionHistoryStore transactionHistoryStore;
 
   private static TransactionInfoCapsule transactionInfoCapsule;
 
   static {
-    dbPath = "output_TransactionHistoryStore_test";
     Args.setParam(
         new String[]{
-            "--output-directory", dbPath,
-            "--storage-db-directory", dbDirectory,
-            "--storage-index-directory", indexDirectory
+            "--output-directory", dbPath(),
+            "--storage-db-directory", dbDirectory
         },
-        Constant.TEST_CONF
+        TestConstants.TEST_CONF
     );
   }
 
@@ -59,5 +56,12 @@ public class TransactionHistoryTest extends BaseTest {
     Assert.assertEquals(200L, resultCapsule.getBlockTimeStamp());
     Assert.assertEquals(ByteArray.toHexString(transactionId),
         ByteArray.toHexString(resultCapsule.getId()));
+  }
+
+  @Test
+  public void testDelete() throws BadItemException {
+    transactionHistoryStore.delete(transactionId);
+    TransactionInfoCapsule transactionInfoCapsule = transactionHistoryStore.get(transactionId);
+    Assert.assertNull(transactionInfoCapsule);
   }
 }

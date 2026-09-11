@@ -23,8 +23,10 @@ public class VM {
     try {
       long factor = DYNAMIC_ENERGY_FACTOR_DECIMAL;
       long energyUsage = 0L;
+      // hoist once per execution: avoids a per-opcode VMConfig.current() thread-local lookup
+      final boolean allowDynamicEnergy = VMConfig.allowDynamicEnergy();
 
-      if (VMConfig.allowDynamicEnergy()) {
+      if (allowDynamicEnergy) {
         factor = program.updateContextContractFactor();
       }
 
@@ -47,7 +49,7 @@ public class VM {
           String opName = Op.getNameOf(op.getOpcode());
           /* spend energy before execution */
           long energy = op.getEnergyCost(program);
-          if (VMConfig.allowDynamicEnergy()) {
+          if (allowDynamicEnergy) {
             long actualEnergy = energy;
             // CALL Ops have special calculation on energy.
             if (CALL_OPS.contains(op.getOpcode())) {
@@ -101,14 +103,17 @@ public class VM {
         }
       }
 
-      if (VMConfig.allowDynamicEnergy()) {
+      if (allowDynamicEnergy) {
         program.addContextContractUsage(energyUsage);
       }
 
     } catch (JVMStackOverFlowException | OutOfTimeException e) {
       throw e;
     } catch (RuntimeException e) {
-      if (StringUtils.isEmpty(e.getMessage())) {
+      // https://openjdk.org/jeps/358
+      // https://bugs.openjdk.org/browse/JDK-8220715
+      // since jdk 14, the NullPointerExceptions message is not empty
+      if (e instanceof NullPointerException || StringUtils.isEmpty(e.getMessage())) {
         logger.warn("Unknown Exception occurred, tx id: {}",
             Hex.toHexString(program.getRootTransactionId()), e);
         program.setRuntimeFailure(new RuntimeException("Unknown Exception"));

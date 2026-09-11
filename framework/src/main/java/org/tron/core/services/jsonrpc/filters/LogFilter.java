@@ -13,7 +13,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.tron.common.bloom.Bloom;
 import org.tron.common.crypto.Hash;
 import org.tron.common.runtime.vm.DataWord;
-import org.tron.core.exception.JsonRpcInvalidParamsException;
+import org.tron.core.config.args.Args;
+import org.tron.core.exception.jsonrpc.JsonRpcInvalidParamsException;
 import org.tron.core.services.jsonrpc.TronJsonRpc.FilterRequest;
 import org.tron.protos.Protocol.TransactionInfo.Log;
 
@@ -35,6 +36,8 @@ public class LogFilter {
   @Setter
   private Bloom[][] filterBlooms;
 
+  // The maximum number of topic criteria allowed, vm.LOG4 - vm.LOG0
+  private final int maxTopics = 4;
 
   public LogFilter() {
   }
@@ -47,9 +50,17 @@ public class LogFilter {
       withContractAddress(addressToByteArray((String) fr.getAddress()));
 
     } else if (fr.getAddress() instanceof ArrayList) {
+      int maxAddressSize = Args.getInstance().getJsonRpcMaxAddressSize();
+      if (maxAddressSize > 0 && ((ArrayList<?>) fr.getAddress()).size() > maxAddressSize) {
+        throw new JsonRpcInvalidParamsException("exceed max addresses: " + maxAddressSize);
+      }
       List<byte[]> addr = new ArrayList<>();
       int i = 0;
       for (Object s : (ArrayList) fr.getAddress()) {
+        if (!(s instanceof String)) {
+          throw new JsonRpcInvalidParamsException(
+              String.format("invalid address at index %d: %s", i, s));
+        }
         try {
           addr.add(addressToByteArray((String) s));
           i++;
@@ -66,8 +77,8 @@ public class LogFilter {
 
     if (fr.getTopics() != null) {
       //restrict depth of topics, because event has a signature and most 3 indexed parameters
-      if (fr.getTopics().length > 4) {
-        throw new JsonRpcInvalidParamsException("topics size should be <= 4");
+      if (fr.getTopics().length > maxTopics) {
+        throw new JsonRpcInvalidParamsException("topics size should be <= " + maxTopics);
       }
       for (Object topic : fr.getTopics()) {
         if (topic == null) {
@@ -79,9 +90,16 @@ public class LogFilter {
             throw new JsonRpcInvalidParamsException("invalid topic(s): " + topic);
           }
         } else if (topic instanceof ArrayList) {
+          int maxSubTopics = Args.getInstance().getJsonRpcMaxSubTopics();
+          if (maxSubTopics > 0 && ((ArrayList<?>) topic).size() > maxSubTopics) {
+            throw new JsonRpcInvalidParamsException("exceed max topics: " + maxSubTopics);
+          }
 
           List<byte[]> t = new ArrayList<>();
           for (Object s : ((ArrayList) topic)) {
+            if (!(s instanceof String)) {
+              throw new JsonRpcInvalidParamsException("invalid topic(s): " + s);
+            }
             try {
               t.add(new DataWord(topicToByteArray((String) s)).getData());
             } catch (JsonRpcInvalidParamsException e) {

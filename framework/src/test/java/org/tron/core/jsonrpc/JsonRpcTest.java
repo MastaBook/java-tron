@@ -8,17 +8,20 @@ import static org.tron.core.services.jsonrpc.JsonRpcApiUtil.parseEnergyFee;
 
 import java.util.ArrayList;
 import java.util.BitSet;
+import java.util.Collections;
 import java.util.List;
 import org.bouncycastle.util.encoders.Hex;
 import org.junit.Assert;
 import org.junit.Test;
 import org.tron.common.bloom.Bloom;
 import org.tron.common.crypto.Hash;
+import org.tron.common.parameter.CommonParameter;
 import org.tron.common.runtime.vm.DataWord;
 import org.tron.common.utils.ByteArray;
 import org.tron.common.utils.ByteUtil;
 import org.tron.common.utils.Commons;
-import org.tron.core.exception.JsonRpcInvalidParamsException;
+import org.tron.core.exception.jsonrpc.JsonRpcInvalidParamsException;
+import org.tron.core.services.jsonrpc.JsonRpcApiUtil;
 import org.tron.core.services.jsonrpc.TronJsonRpc.FilterRequest;
 import org.tron.core.services.jsonrpc.filters.LogBlockQuery;
 import org.tron.core.services.jsonrpc.filters.LogFilter;
@@ -140,13 +143,13 @@ public class JsonRpcTest {
     try {
       addressCompatibleToByteArray(rawAddress.substring(1));
     } catch (JsonRpcInvalidParamsException e) {
-      Assert.assertEquals("invalid address hash value", e.getMessage());
+      Assert.assertEquals("invalid address", e.getMessage());
     }
 
     try {
       addressCompatibleToByteArray(rawAddress + "00");
     } catch (JsonRpcInvalidParamsException e) {
-      Assert.assertEquals("invalid address hash value", e.getMessage());
+      Assert.assertEquals("invalid address", e.getMessage());
     }
 
   }
@@ -174,6 +177,22 @@ public class JsonRpcTest {
     } catch (JsonRpcInvalidParamsException e) {
       Assert.fail();
     }
+
+    // oversized input rejected before fromHexString
+    try {
+      addressToByteArray("0x" + new String(new char[64]).replace('\0', 'a'));
+      Assert.fail();
+    } catch (JsonRpcInvalidParamsException e) {
+      Assert.assertTrue(e.getMessage().contains("invalid address"));
+    }
+
+    // invalid hex char -> invalid params, not a leaked DecoderException
+    try {
+      addressToByteArray("0x548794500882809695a8a687866e76d4271a1abz");
+      Assert.fail();
+    } catch (JsonRpcInvalidParamsException e) {
+      Assert.assertTrue(e.getMessage().contains("invalid address"));
+    }
   }
 
   /**
@@ -182,7 +201,7 @@ public class JsonRpcTest {
   @Test
   public void testLogFilter() {
 
-    //topic must be 64 hex string
+    //topic must be 63 or 64 hex string, full 64-char form here
     try {
       new LogFilter(new FilterRequest(null, null, null,
           new String[] {"0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"},
@@ -190,6 +209,20 @@ public class JsonRpcTest {
     } catch (JsonRpcInvalidParamsException e) {
       Assert.fail();
     }
+
+    //63-char form: leading zero stripped by some clients, padded back to the same topic
+    String paddedAddressTopic =
+        "000000000000000000000000f0cc5a2a84cd0f68ed1667070934542d673acbd8";
+    try {
+      LogFilter full = new LogFilter(new FilterRequest(null, null, null,
+          new String[] {null, "0x" + paddedAddressTopic}, null));
+      LogFilter stripped = new LogFilter(new FilterRequest(null, null, null,
+          new String[] {null, "0x" + paddedAddressTopic.substring(1)}, null));
+      Assert.assertArrayEquals(full.getTopics().get(1)[0], stripped.getTopics().get(1)[0]);
+    } catch (JsonRpcInvalidParamsException e) {
+      Assert.fail();
+    }
+
     try {
       new LogFilter(new FilterRequest(null, null, null, new String[] {"0x0"}, null));
     } catch (JsonRpcInvalidParamsException e) {
@@ -204,6 +237,20 @@ public class JsonRpcTest {
     } catch (JsonRpcInvalidParamsException e) {
       Assert.assertTrue(e.getMessage().contains("invalid topic"));
     }
+
+    // non-string element in address array -> -32602, not a leaked ClassCastException
+    JsonRpcInvalidParamsException badAddrElement = Assert.assertThrows(
+        JsonRpcInvalidParamsException.class,
+        () -> new LogFilter(new FilterRequest(null, null,
+            new ArrayList<>(Collections.singletonList(1)), null, null)));
+    Assert.assertEquals("invalid address at index 0: 1", badAddrElement.getMessage());
+
+    // non-string element in nested topic array -> -32602, not a leaked ClassCastException
+    JsonRpcInvalidParamsException badTopicElement = Assert.assertThrows(
+        JsonRpcInvalidParamsException.class,
+        () -> new LogFilter(new FilterRequest(null, null, null,
+            new Object[] {new ArrayList<>(Collections.singletonList(1))}, null)));
+    Assert.assertEquals("invalid topic(s): 1", badTopicElement.getMessage());
 
     // topic size should be <= 4
     try {
@@ -240,106 +287,55 @@ public class JsonRpcTest {
     }
   }
 
-  /**
-   * test fromBlock and toBlock parameters
-   */
   @Test
-  public void testLogFilterWrapper() {
+  public void testLogFilterAddressSizeLimit() {
+    // Two valid 20-byte addresses (40 hex chars with 0x prefix)
+    String addr1 = "0xaa6612f03443517ced2bdcf27958c22353ceeab9";
+    String addr2 = "0xbb7723a04554628ced3cdf38069b433464ffbc0a";
+    String addr3 = "0xcc8834b15665739def4de049f17a544575aabcd1";
 
-    // fromBlock and toBlock are both empty
+    int savedLimit = CommonParameter.getInstance().jsonRpcMaxAddressSize;
     try {
-      LogFilterWrapper logFilterWrapper =
-          new LogFilterWrapper(new FilterRequest(null, null, null, null, null), 100, null);
-      Assert.assertEquals(logFilterWrapper.getFromBlock(), 100);
-      Assert.assertEquals(logFilterWrapper.getToBlock(), Long.MAX_VALUE);
-    } catch (JsonRpcInvalidParamsException e) {
-      Assert.fail();
-    }
+      CommonParameter.getInstance().jsonRpcMaxAddressSize = 2;
 
-    // fromBlock is not empty and smaller than currentMaxBlockNum, toBlock is empty
-    try {
-      LogFilterWrapper logFilterWrapper =
-          new LogFilterWrapper(new FilterRequest("0x14", null, null, null, null), 100, null);
-      Assert.assertEquals(logFilterWrapper.getFromBlock(), 20);
-      Assert.assertEquals(logFilterWrapper.getToBlock(), Long.MAX_VALUE);
-    } catch (JsonRpcInvalidParamsException e) {
-      Assert.fail();
-    }
+      // Exactly at limit — must not throw
+      ArrayList<String> atLimit = new ArrayList<>();
+      atLimit.add(addr1);
+      atLimit.add(addr2);
+      FilterRequest frAtLimit = new FilterRequest();
+      frAtLimit.setAddress(atLimit);
+      try {
+        new LogFilter(frAtLimit);
+      } catch (JsonRpcInvalidParamsException e) {
+        Assert.fail("address list at limit should not throw: " + e.getMessage());
+      }
 
-    // fromBlock is not empty and bigger than currentMaxBlockNum, toBlock is empty
-    try {
-      LogFilterWrapper logFilterWrapper =
-          new LogFilterWrapper(new FilterRequest("0x78", null, null, null, null), 100, null);
-      Assert.assertEquals(logFilterWrapper.getFromBlock(), 120);
-      Assert.assertEquals(logFilterWrapper.getToBlock(), Long.MAX_VALUE);
-    } catch (JsonRpcInvalidParamsException e) {
-      Assert.fail();
-    }
+      // One over limit — must throw with expected message
+      ArrayList<String> overLimit = new ArrayList<>();
+      overLimit.add(addr1);
+      overLimit.add(addr2);
+      overLimit.add(addr3);
+      FilterRequest frOverLimit = new FilterRequest();
+      frOverLimit.setAddress(overLimit);
+      try {
+        new LogFilter(frOverLimit);
+        Assert.fail("address list over limit should have thrown JsonRpcInvalidParamsException");
+      } catch (JsonRpcInvalidParamsException e) {
+        Assert.assertTrue(e.getMessage().contains("exceed max addresses:"));
+      }
 
-    // fromBlock is empty, toBlock is not empty and smaller than currentMaxBlockNum
-    try {
-      LogFilterWrapper logFilterWrapper =
-          new LogFilterWrapper(new FilterRequest(null, "0x14", null, null, null), 100, null);
-      Assert.assertEquals(logFilterWrapper.getFromBlock(), 20);
-      Assert.assertEquals(logFilterWrapper.getToBlock(), 20);
-    } catch (JsonRpcInvalidParamsException e) {
-      Assert.fail();
-    }
-
-    // fromBlock is empty, toBlock is not empty and bigger than currentMaxBlockNum
-    try {
-      LogFilterWrapper logFilterWrapper =
-          new LogFilterWrapper(new FilterRequest(null, "0x78", null, null, null), 100, null);
-      Assert.assertEquals(logFilterWrapper.getFromBlock(), 100);
-      Assert.assertEquals(logFilterWrapper.getToBlock(), 120);
-    } catch (JsonRpcInvalidParamsException e) {
-      Assert.fail();
-    }
-
-    // fromBlock is not empty, toBlock is not empty
-    try {
-      LogFilterWrapper logFilterWrapper =
-          new LogFilterWrapper(new FilterRequest("0x14", "0x78", null, null, null), 100, null);
-      Assert.assertEquals(logFilterWrapper.getFromBlock(), 20);
-      Assert.assertEquals(logFilterWrapper.getToBlock(), 120);
-    } catch (JsonRpcInvalidParamsException e) {
-      Assert.fail();
-    }
-    try {
-      LogFilterWrapper logFilterWrapper =
-          new LogFilterWrapper(new FilterRequest("0x78", "0x14", null, null, null), 100, null);
-    } catch (JsonRpcInvalidParamsException e) {
-      Assert.assertEquals("please verify: fromBlock <= toBlock", e.getMessage());
-    }
-
-    //fromBlock or toBlock is not hex num
-    try {
-      LogFilterWrapper logFilterWrapper =
-          new LogFilterWrapper(new FilterRequest("earliest", null, null, null, null), 100, null);
-      Assert.assertEquals(logFilterWrapper.getFromBlock(), 0);
-      Assert.assertEquals(logFilterWrapper.getToBlock(), Long.MAX_VALUE);
-    } catch (JsonRpcInvalidParamsException e) {
-      Assert.fail();
-    }
-    try {
-      LogFilterWrapper logFilterWrapper =
-          new LogFilterWrapper(new FilterRequest("latest", null, null, null, null), 100, null);
-      Assert.assertEquals(logFilterWrapper.getFromBlock(), 100);
-      Assert.assertEquals(logFilterWrapper.getToBlock(), Long.MAX_VALUE);
-    } catch (JsonRpcInvalidParamsException e) {
-      Assert.fail();
-    }
-    try {
-      LogFilterWrapper logFilterWrapper =
-          new LogFilterWrapper(new FilterRequest("pending", null, null, null, null), 100, null);
-    } catch (JsonRpcInvalidParamsException e) {
-      Assert.assertEquals("TAG pending not supported", e.getMessage());
-    }
-    try {
-      LogFilterWrapper logFilterWrapper =
-          new LogFilterWrapper(new FilterRequest("test", null, null, null, null), 100, null);
-    } catch (JsonRpcInvalidParamsException e) {
-      Assert.assertEquals("Incorrect hex syntax", e.getMessage());
+      // Limit = 0 means disabled — large list must pass
+      CommonParameter.getInstance().jsonRpcMaxAddressSize = 0;
+      ArrayList<String> largeList = new ArrayList<>(Collections.nCopies(500, addr1));
+      FilterRequest frDisabled = new FilterRequest();
+      frDisabled.setAddress(largeList);
+      try {
+        new LogFilter(frDisabled);
+      } catch (JsonRpcInvalidParamsException e) {
+        Assert.fail("limit=0 should disable the check: " + e.getMessage());
+      }
+    } finally {
+      CommonParameter.getInstance().jsonRpcMaxAddressSize = savedLimit;
     }
   }
 
@@ -347,17 +343,16 @@ public class JsonRpcTest {
     Bloom bloom = Bloom.create(Hash.sha3(ByteArray.fromHexString(s)));
     BitSet bs = BitSet.valueOf(bloom.getData());
 
-    int[] bitIndex = new int[3]; //must same as the number of hash function in Bloom
-    int nonZeroCount = 0;
+    List<Integer> bitIndexList = new ArrayList<>();
     for (int i = bs.nextSetBit(0); i >= 0; i = bs.nextSetBit(i + 1)) {
       // operate on index i here
       if (i == Integer.MAX_VALUE) {
         break; // or (i+1) would overflow
       }
-      bitIndex[nonZeroCount++] = i;
+      bitIndexList.add(i);
     }
 
-    return bitIndex;
+    return bitIndexList.stream().mapToInt(Integer::intValue).toArray();
   }
 
   @Test
@@ -386,7 +381,8 @@ public class JsonRpcTest {
               topics,
               null),
               100,
-              null);
+              null,
+              false);
 
       LogBlockQuery logBlockQuery = new LogBlockQuery(logFilterWrapper, null, 100, null);
       int[][][] conditions = logBlockQuery.getConditions();
@@ -415,5 +411,50 @@ public class JsonRpcTest {
     } catch (JsonRpcInvalidParamsException e) {
       Assert.fail();
     }
+  }
+
+  @Test
+  public void testGetConditionWithHashCollision() {
+    try {
+      List<String> addressList = new ArrayList<>();
+      addressList.add("0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85");
+      addressList.add("0x3038114c1a1e72c5bfa8b003bc3650ad2ba254a0");
+
+      Object[] topics = new Object[0];
+
+      LogFilterWrapper logFilterWrapper =
+          new LogFilterWrapper(new FilterRequest(null,
+              null,
+              addressList,
+              topics,
+              null),
+              100,
+              null,
+              false);
+
+      LogBlockQuery logBlockQuery = new LogBlockQuery(logFilterWrapper, null, 100, null);
+      int[][][] conditions = logBlockQuery.getConditions();
+      //level = depth(address) + depth(topics), skip null
+      Assert.assertEquals(1, conditions.length);
+      //elements number
+      Assert.assertEquals(2, conditions[0].length);
+
+      Assert.assertEquals(3, conditions[0][0].length);
+      //Hash collision, only two nonZero position
+      Assert.assertEquals(2, conditions[0][1].length);
+
+      Assert.assertArrayEquals(conditions[0][0],
+          getBloomIndex("0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85"));
+      Assert.assertArrayEquals(conditions[0][1],
+          getBloomIndex("0x3038114c1a1e72c5bfa8b003bc3650ad2ba254a0"));
+
+    } catch (JsonRpcInvalidParamsException e) {
+      Assert.fail();
+    }
+  }
+
+  @Test
+  public void testGenerateFilterId() {
+    Assert.assertEquals(32, JsonRpcApiUtil.generateFilterId().length());
   }
 }

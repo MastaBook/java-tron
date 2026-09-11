@@ -1,5 +1,8 @@
 package org.tron.core.zksnark;
 
+import static org.tron.common.math.Maths.random;
+import static org.tron.common.math.Maths.round;
+
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.BeforeClass;
@@ -8,7 +11,7 @@ import org.tron.common.utils.ByteArray;
 import org.tron.core.config.args.Args;
 import org.tron.core.exception.BadItemException;
 import org.tron.core.exception.ZksnarkException;
-import org.tron.core.services.http.FullNodeHttpApiService;
+import org.tron.core.zen.ZksnarkInitService;
 import org.tron.core.zen.address.DiversifierT;
 import org.tron.core.zen.address.PaymentAddress;
 import org.tron.core.zen.address.SpendingKey;
@@ -19,9 +22,9 @@ public class SaplingNoteTest {
 
   @BeforeClass
   public static void init() {
-    Args.setFullNodeAllowShieldedTransaction(true);
+    Args.getInstance().setAllowShieldedTransactionApi(true);
     // Args.getInstance().setAllowShieldedTransaction(1);
-    FullNodeHttpApiService.librustzcashInitZksnarkParams();
+    ZksnarkInitService.librustzcashInitZksnarkParams();
   }
 
   @AfterClass
@@ -30,7 +33,7 @@ public class SaplingNoteTest {
   }
 
   private static int randomInt(int minInt, int maxInt) {
-    return (int) Math.round(Math.random() * (maxInt - minInt) + minInt);
+    return (int) round(random(true) * (maxInt - minInt) + minInt, true);
   }
 
   @Test

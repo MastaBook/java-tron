@@ -17,6 +17,7 @@ package org.tron.core.capsule;
 
 import static org.tron.common.utils.StringUtil.encode58Check;
 import static org.tron.common.utils.WalletUtil.checkPermissionOperations;
+import static org.tron.core.Constant.MAX_CONTRACT_RESULT_SIZE;
 import static org.tron.core.exception.P2pException.TypeEnum.PROTOBUF_ERROR;
 
 import com.google.common.primitives.Bytes;
@@ -27,22 +28,25 @@ import com.google.protobuf.CodedOutputStream;
 import com.google.protobuf.GeneratedMessageV3;
 import com.google.protobuf.Internal;
 import com.google.protobuf.InvalidProtocolBufferException;
+import com.google.protobuf.UnknownFieldSet;
 import java.io.IOException;
 import java.security.SignatureException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.ArrayUtils;
 import org.tron.common.crypto.ECKey.ECDSASignature;
+import org.tron.common.crypto.Rsv;
 import org.tron.common.crypto.SignInterface;
 import org.tron.common.crypto.SignUtils;
+import org.tron.common.es.ExecutorServiceManager;
 import org.tron.common.overlay.message.Message;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.common.utils.ByteArray;
@@ -58,6 +62,7 @@ import org.tron.core.exception.ContractValidateException;
 import org.tron.core.exception.P2pException;
 import org.tron.core.exception.PermissionException;
 import org.tron.core.exception.SignatureFormatException;
+import org.tron.core.exception.TransactionExpirationException;
 import org.tron.core.exception.ValidateSignatureException;
 import org.tron.core.store.AccountStore;
 import org.tron.core.store.DynamicPropertiesStore;
@@ -86,10 +91,13 @@ import org.tron.protos.contract.WitnessContract.WitnessUpdateContract;
 @Slf4j(topic = "capsule")
 public class TransactionCapsule implements ProtoCapsule<Transaction> {
 
-  private static final ExecutorService executorService = Executors
-      .newFixedThreadPool(CommonParameter.getInstance()
+  private static final String esName = "valid-contract-proto";
+  private static final ExecutorService executorService = ExecutorServiceManager
+      .newFixedThreadPool(esName, CommonParameter.getInstance()
           .getValidContractProtoThreadNum());
   private static final String OWNER_ADDRESS = "ownerAddress_";
+  // 2-6 ms in general, so we set 50 ms as the threshold for slow signature verification.
+  private static final long SLOW_SIG_VERIFY_MS = 50;
 
   private Transaction transaction;
   @Setter
@@ -101,7 +109,6 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
   @Setter
   private TransactionTrace trxTrace;
 
-  private StringBuilder toStringBuff = new StringBuilder();
   @Getter
   @Setter
   private long time;
@@ -114,6 +121,9 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
   @Getter
   @Setter
   private boolean isTransactionCreate = false;
+  @Getter
+  @Setter
+  private boolean isInBlock = false;
 
   public byte[] getOwnerAddress() {
     if (this.ownerAddress == null) {
@@ -241,7 +251,7 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
       long weight = getWeight(permission, address);
       if (weight == 0) {
         throw new PermissionException(
-            ByteArray.toHexString(sig.toByteArray()) + " is signed by " + encode58Check(address)
+            ByteArray.toHexString(hash) + " is signed by " + encode58Check(address)
                 + " but it is not contained of permission.");
       }
       if (ForkController.instance().pass(Parameter.ForkBlockVersionEnum.VERSION_4_7_1)) {
@@ -346,6 +356,10 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
         }
       }
       return owner.toByteArray();
+    } catch (InvalidProtocolBufferException invalidProtocolBufferException) {
+      logger.warn("InvalidProtocolBufferException occurred because {}, please verify the interface "
+          + "input parameters", invalidProtocolBufferException.getMessage());
+      return new byte[0];
     } catch (Exception ex) {
       logger.error(ex.getMessage());
       return new byte[0];
@@ -447,14 +461,8 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
   }
 
   public static String getBase64FromByteString(ByteString sign) {
-    byte[] r = sign.substring(0, 32).toByteArray();
-    byte[] s = sign.substring(32, 64).toByteArray();
-    byte v = sign.byteAt(64);
-    if (v < 27) {
-      v += 27; //revId -> v
-    }
-    ECDSASignature signature = ECDSASignature.fromComponents(r, s, v);
-    return signature.toBase64();
+    Rsv rsv = Rsv.fromSignature(sign.toByteArray());
+    return ECDSASignature.fromComponents(rsv.getR(), rsv.getS(), rsv.getV()).toBase64();
   }
 
   public static boolean validateSignature(Transaction transaction,
@@ -485,6 +493,16 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
       return true;
     }
     return false;
+  }
+
+  public boolean sanitize() {
+    if (this.transaction.getUnknownFields().asMap().isEmpty()) {
+      return false;
+    }
+    this.transaction = this.transaction.toBuilder()
+        .setUnknownFields(UnknownFieldSet.getDefaultInstance())
+        .build();
+    return true;
   }
 
   public void resetResult() {
@@ -613,7 +631,7 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
         .signHash(getTransactionId().getBytes())));
     this.transaction = this.transaction.toBuilder().addSignature(sig).build();
   }
-  
+
   private static void checkPermission(int permissionId, Permission permission, Transaction.Contract contract) throws PermissionException {
     if (permissionId != 0) {
       if (permission.getType() != PermissionType.Active) {
@@ -644,6 +662,7 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
 
       byte[] hash = getTransactionId().getBytes();
 
+      long startNs = System.nanoTime();
       try {
         if (!validateSignature(this.transaction, hash, accountStore, dynamicPropertiesStore)) {
           isVerified = false;
@@ -652,10 +671,25 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
       } catch (SignatureException | PermissionException | SignatureFormatException e) {
         isVerified = false;
         throw new ValidateSignatureException(e.getMessage());
+      } finally {
+        logSlowSigVerify(startNs);
       }
       isVerified = true;
     }
     return true;
+  }
+
+  /**
+   * WARN-logs when a single signature verification exceeds
+   * {@link #SLOW_SIG_VERIFY_MS}. Package-private so it can be exercised from
+   * tests without forcing a real slow crypto path.
+   */
+  void logSlowSigVerify(long startNs) {
+    long costMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs);
+    if (costMs > SLOW_SIG_VERIFY_MS) {
+      logger.warn("slow verify: txId={}, sigCount={}, cost={} ms",
+          getTransactionId(), this.transaction.getSignatureCount(), costMs);
+    }
   }
 
   /**
@@ -680,7 +714,7 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
         }
       }
       isVerified = true;
-    }  
+    }
     return true;
   }
 
@@ -726,6 +760,15 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
     return size;
   }
 
+  public long getResultSizeWithMaxContractRet() {
+    long size = 0;
+    for (Result result : this.transaction.getRetList()) {
+      size += result.toBuilder().clearContractRet().build().getSerializedSize()
+          + MAX_CONTRACT_RESULT_SIZE;
+    }
+    return size;
+  }
+
   @Override
   public Transaction getInstance() {
     return this.transaction;
@@ -733,8 +776,7 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
 
   @Override
   public String toString() {
-
-    toStringBuff.setLength(0);
+    StringBuilder toStringBuff = new StringBuilder();
     toStringBuff.append("TransactionCapsule \n[ ");
 
     toStringBuff.append("hash=").append(getTransactionId()).append("\n");
@@ -838,5 +880,40 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
     } catch (InvalidProtocolBufferException e) {
       return null;
     }
+  }
+
+  public void removeRedundantRet() {
+    Transaction tx = this.getInstance();
+    List<Result> tmpList = new ArrayList<>(tx.getRetList());
+    int contractCount = tx.getRawData().getContractCount();
+    if (tx.getRetCount() > contractCount && contractCount > 0) {
+      Transaction.Builder transactionBuilder = tx.toBuilder().clearRet();
+      for (int i = 0; i < contractCount; i++) {
+        Result result = tmpList.get(i);
+        transactionBuilder.addRet(result);
+      }
+      this.transaction = transactionBuilder.build();
+    }
+  }
+
+  public void checkExpiration(long nextSlotTime) throws TransactionExpirationException {
+    if (getExpiration() < nextSlotTime) {
+      throw new TransactionExpirationException(String.format(
+          "Transaction expiration time is %d, but next slot time is %d",
+          getExpiration(), nextSlotTime));
+    }
+  }
+
+  public boolean retCountIsGreatThanContractCount() {
+    int contractCount = getContractCount();
+    return getRetCount() > contractCount && contractCount > 0;
+  }
+
+  public int getRetCount() {
+    return this.getInstance().getRetCount();
+  }
+
+  public int getContractCount() {
+    return this.getInstance().getRawData().getContractCount();
   }
 }
